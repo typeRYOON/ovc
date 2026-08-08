@@ -35,6 +35,7 @@ public:
 
     std::optional<ovc::git::MapsetEntry> trackCurrentMapset(QString* err);
     void requestManualSnapshot(const QString& repoId);
+    void setAutoSnapshot(const QString& repoId, bool on);
     RestorePreflight preflightRestore(const QString& repoId) const;
     std::optional<ovc::git::SnapshotResult> restore(const QString& repoId, const QByteArray& oid,
                                                     QString* err);

@@ -158,6 +158,15 @@ void TrackingService::requestManualSnapshot(const QString& repoId)
     enqueueSnapshot(repoId, QStringLiteral("manual"));
 }
 
+void TrackingService::setAutoSnapshot(const QString& repoId, bool on)
+{
+    MapsetEntry* e = m_registry.findByRepoId(repoId);
+    if (!e || e->autoSnapshot == on) return;
+    e->autoSnapshot = on;
+    m_registry.save();
+    emit trackedListChanged();
+}
+
 void TrackingService::enqueueSnapshot(const QString& repoId, const QString& trigger)
 {
     if (repoId.isEmpty()) return;

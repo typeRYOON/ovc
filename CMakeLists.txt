@@ -75,14 +75,25 @@ target_link_libraries(ovc_watch PUBLIC Qt6::Core Qt6::Concurrent ovc_git)
 
 # -- ui -----------------------------------------------------------------------
 qt_add_library(ovc_ui STATIC
+    src/chrome/titlebar.cpp
+    src/chrome/windowchrome.cpp
     src/ui/mainwindow.cpp
+    src/ui/mapsetmodel.cpp
+    src/ui/historymodel.cpp
+    src/ui/diffview.cpp
+    include/chrome/framelesschrome.h
+    include/chrome/titlebar.h
+    include/chrome/windowchrome.h
     include/ui/mainwindow.h
+    include/ui/mapsetmodel.h
+    include/ui/historymodel.h
+    include/ui/diffview.h
 )
 target_include_directories(ovc_ui PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(ovc_ui PUBLIC Qt6::Gui Qt6::Widgets ovc_watch)
 
 # -- executables --------------------------------------------------------------
-qt_add_executable(ovc src/main.cpp)
+qt_add_executable(ovc src/main.cpp resources/resources.qrc)
 target_link_libraries(ovc PRIVATE ovc_ui)
 
 qt_add_executable(ovc-cli src/main_cli.cpp)

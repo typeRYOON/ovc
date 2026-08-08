@@ -1,0 +1,293 @@
+/* ── ovc app-wide ─────────────────────────────────────────────────────────────
+   Palette tokens (tagcomposer's cheat sheet):
+       Surfaces:   #0a0a0a chrome   #0d0d0d page   #0f0f0f panel   #111111 raised
+                   #141414 input    #181818 focus  #1a1a1a hover
+       Borders:    #1a1a1a faint    #222222 default  #2a2a2a emphatic  #333 focus
+       Text:       #e0e0e0 primary  #aaaaaa secondary  #888888 muted  #555 hint
+       Accents:    green #66aa66    red #cc6666    amber #c8a050    blue #77aadd
+*/
+
+QMainWindow, QWidget {
+    background: transparent;
+    color: #e0e0e0;
+    font-family: "Hiragino Maru Gothic ProN W4";
+    font-size: 15px;
+}
+
+/* ── Frameless chrome ────────────────────────────────────────────────────── */
+
+#MainFrame {
+    background: #0a0a0a;
+}
+
+#ChromedDialogBody {
+    background: #0d0d0d;
+}
+
+#TitleBar {
+    background: #0a0a0a;
+    border-bottom: 1px solid #1a1a1a;
+}
+
+#TitleBarTitle {
+    background: transparent;
+    color: #888888;
+    font-size: 12px;
+    padding-left: 4px;
+}
+
+#TitleBarMin, #TitleBarMax, #TitleBarClose {
+    background: transparent;
+    color: #888888;
+    border: none;
+    font-size: 13px;
+}
+
+#TitleBarMin:hover, #TitleBarMax:hover {
+    background: #1a1a1a;
+    color: #e0e0e0;
+}
+
+#TitleBarMin:pressed, #TitleBarMax:pressed {
+    background: #222222;
+}
+
+#TitleBarClose:hover {
+    background: #c42b1c;
+    color: #ffffff;
+}
+
+#TitleBarClose:pressed {
+    background: #8a1f15;
+}
+
+/* ── Panes ───────────────────────────────────────────────────────────────── */
+
+#MapsetPane, #HistoryPane, #DiffPane {
+    background: #0d0d0d;
+}
+
+#MapsetPane {
+    border-right: 1px solid #1a1a1a;
+}
+
+#HistoryPane {
+    border-right: 1px solid #1a1a1a;
+}
+
+QLabel#PaneHeader {
+    color: #888888;
+    font-size: 13px;
+    padding: 10px 12px 6px 12px;
+    background: transparent;
+}
+
+QSplitter::handle {
+    background: #1a1a1a;
+    width: 1px;
+}
+
+/* ── Lists ───────────────────────────────────────────────────────────────── */
+
+QListView {
+    background: transparent;
+    border: none;
+    outline: 0;
+    padding: 0 4px;
+}
+
+QListView::item {
+    border-radius: 5px;
+    padding: 2px;
+}
+
+QListView::item:hover {
+    background: #161616;
+}
+
+QListView::item:selected {
+    background: #1e1e1e;
+}
+
+/* ── Buttons / inputs ────────────────────────────────────────────────────── */
+
+QPushButton {
+    background: #141414;
+    color: #cccccc;
+    border: 1px solid #222222;
+    border-radius: 4px;
+    padding: 6px 14px;
+}
+
+QPushButton:hover {
+    background: #1a1a1a;
+    border-color: #3a3a3a;
+}
+
+QPushButton:pressed {
+    background: #101010;
+}
+
+QPushButton:disabled {
+    color: #555555;
+    border-color: #1a1a1a;
+}
+
+QPushButton#TrackButton {
+    background: #142014;
+    border-color: #336633;
+    color: #8fbf8f;
+}
+
+QPushButton#TrackButton:hover {
+    background: #1a2a1a;
+    border-color: #4a8a4a;
+}
+
+QCheckBox {
+    color: #aaaaaa;
+    background: transparent;
+    spacing: 6px;
+}
+
+QCheckBox::indicator {
+    width: 15px;
+    height: 15px;
+    border: 1px solid #2a2a2a;
+    border-radius: 3px;
+    background: #141414;
+}
+
+QCheckBox::indicator:checked {
+    background: #336633;
+    border-color: #4a8a4a;
+}
+
+/* ── Detection footer card ───────────────────────────────────────────────── */
+
+#DetectCard {
+    background: #0f0f0f;
+    border-top: 1px solid #1a1a1a;
+}
+
+QLabel#DetectTitle {
+    color: #cccccc;
+    background: transparent;
+    font-size: 14px;
+}
+
+QLabel#DetectSub {
+    color: #666666;
+    background: transparent;
+    font-size: 12px;
+}
+
+QLabel[pill="attached"] {
+    color: #66aa66;
+    background: transparent;
+    font-size: 12px;
+}
+
+QLabel[pill="detached"] {
+    color: #555555;
+    background: transparent;
+    font-size: 12px;
+}
+
+QLabel[pill="editing"] {
+    color: #77aadd;
+    background: transparent;
+    font-size: 12px;
+}
+
+/* ── Diff view ───────────────────────────────────────────────────────────── */
+
+QScrollArea {
+    border: none;
+    background: transparent;
+}
+
+#DiffBody {
+    background: #0d0d0d;
+}
+
+QToolButton#SectionHeader {
+    background: #111111;
+    color: #aaaaaa;
+    border: 1px solid #1e1e1e;
+    border-radius: 5px;
+    padding: 6px 10px;
+    text-align: left;
+    font-size: 14px;
+}
+
+QToolButton#SectionHeader:hover {
+    background: #161616;
+    color: #e0e0e0;
+}
+
+QLabel#DiffRow {
+    background: transparent;
+    color: #cccccc;
+    font-size: 14px;
+    padding: 1px 6px;
+}
+
+QLabel#DiffSummary {
+    background: transparent;
+    color: #888888;
+    font-size: 13px;
+    padding: 6px 12px;
+}
+
+QLabel#EmptyHint {
+    color: #555555;
+    background: transparent;
+    font-size: 14px;
+}
+
+/* ── Scrollbars ──────────────────────────────────────────────────────────── */
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 0;
+}
+
+QScrollBar::handle:vertical {
+    background: #222222;
+    border-radius: 5px;
+    min-height: 30px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #333333;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0;
+}
+
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: transparent;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    height: 10px;
+    margin: 0;
+}
+
+QScrollBar::handle:horizontal {
+    background: #222222;
+    border-radius: 5px;
+    min-width: 30px;
+}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0;
+}
+
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    background: transparent;
+}
