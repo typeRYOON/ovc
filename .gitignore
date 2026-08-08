@@ -1,0 +1,7 @@
+out/
+vcpkg_installed/
+CMakeUserPresets.json
+.vs/
+.cache/
+*.user
+refs/

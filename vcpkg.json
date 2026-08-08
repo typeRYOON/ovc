@@ -1,0 +1,8 @@
+{
+    "name": "ovc",
+    "version-string": "0.1.0",
+    "builtin-baseline": "52896b593e60b8c306aaac9a0a59dc70fb79381f",
+    "dependencies": [
+        "libgit2"
+    ]
+}
