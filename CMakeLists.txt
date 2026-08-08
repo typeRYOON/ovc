@@ -6,14 +6,21 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Concurrent)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Concurrent Test)
 find_package(libgit2 CONFIG REQUIRED)
 qt_standard_project_setup()
 
 # -- osu domain: lossless .osu model, parser, diff (Qt Core only) -------------
 qt_add_library(ovc_osu STATIC
     src/osu/token.cpp
+    src/osu/parser.cpp
+    src/osu/serializer.cpp
+    src/osu/peek.cpp
     include/osu/token.h
+    include/osu/document.h
+    include/osu/parser.h
+    include/osu/serializer.h
+    include/osu/peek.h
 )
 target_include_directories(ovc_osu PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(ovc_osu PUBLIC Qt6::Core)
@@ -72,5 +79,12 @@ if (WIN32)
 endif()
 
 enable_testing()
-# Test suites (test_roundtrip, test_diff, test_store, test_pipeline) land with
-# their milestones, starting at M1.
+qt_add_executable(test_roundtrip tests/test_roundtrip.cpp)
+target_link_libraries(test_roundtrip PRIVATE ovc_osu Qt6::Test)
+target_compile_definitions(test_roundtrip PRIVATE OVC_CORPUS_DIR="${CMAKE_SOURCE_DIR}/refs")
+add_test(NAME roundtrip COMMAND test_roundtrip)
+
+if (WIN32 AND WINDEPLOYQT)
+    add_custom_command(TARGET test_roundtrip POST_BUILD
+        COMMAND "${WINDEPLOYQT}" --no-translations "$<TARGET_FILE:test_roundtrip>")
+endif()
