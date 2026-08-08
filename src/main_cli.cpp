@@ -1,6 +1,9 @@
 #include <git/gitcheck.h>
+#include <osu/canonical.h>
+#include <osu/diff.h>
 #include <osu/parser.h>
 #include <osu/serializer.h>
+#include <utils/timefmt.h>
 #include <watch/gamewatcher.h>
 #include <QCoreApplication>
 #include <QDirIterator>
@@ -163,6 +166,163 @@ int runParseCheck(const QStringList& args)
     return mismatches == 0 ? 0 : 1;
 }
 
+void renderTimingRow(const ovc::osu::TimingPoint& tp)
+{
+    using ovc::utils::msToClock;
+    out() << msToClock(static_cast<qint64>(tp.timeMs)) << "  ";
+    if (tp.uninherited)
+        out() << QString::number(tp.bpm(), 'g', 6) << " BPM";
+    else
+        out() << "SV " << QString::number(tp.sv(), 'g', 4) << "×";
+    if (tp.kiai()) out() << "  kiai";
+}
+
+int runDiff(const QStringList& args)
+{
+    using namespace ovc::osu;
+    using ovc::utils::msToClock;
+    if (args.size() < 2) {
+        out() << "usage: ovc-cli diff <a.osu> <b.osu>\n";
+        return 1;
+    }
+    CanonicalMap maps[2];
+    for (int i = 0; i < 2; ++i) {
+        QFile f(args.at(i));
+        if (!f.open(QIODevice::ReadOnly)) {
+            out() << "cannot read " << args.at(i) << "\n";
+            return 1;
+        }
+        const auto parsed = parseOsu(f.readAll());
+        QList<ParseWarning> warnings = parsed.warnings;
+        maps[i] = canonicalize(parsed.doc, &warnings);
+        for (const auto& w : warnings)
+            out() << args.at(i) << ": warning: " << w.message << "\n";
+    }
+
+    const BeatmapDiff d = diffBeatmaps(maps[0], maps[1]);
+    if (d.isEmpty()) {
+        out() << "no semantic changes\n";
+        out().flush();
+        return 0;
+    }
+
+    static const QHash<int, QByteArray> kSec = {
+        {int(SectionId::General), "[General]"},
+        {int(SectionId::Editor), "[Editor]"},
+        {int(SectionId::Metadata), "[Metadata]"},
+        {int(SectionId::Difficulty), "[Difficulty]"},
+    };
+    for (const KvDiff& sec : d.kv) {
+        out() << kSec.value(int(sec.section), "[?]") << "\n";
+        for (const FieldChange& f : sec.changes) {
+            if (f.before.isEmpty()) out() << "  + " << f.key << ": " << f.after.raw << "\n";
+            else if (f.after.isEmpty()) out() << "  − " << f.key << ": " << f.before.raw << "\n";
+            else out() << "  ~ " << f.key << ": " << f.before.raw << " → " << f.after.raw << "\n";
+        }
+    }
+
+    if (d.modeChanged) out() << "mode changed — hitobject diff skipped\n";
+    if (d.keyCountChanged)
+        out() << d.keyCountBefore << "K → " << d.keyCountAfter
+              << "K — every column remaps, hitobject diff skipped\n";
+
+    if (!d.events.isEmpty()) {
+        out() << "Events\n";
+        if (d.events.background)
+            out() << "  ~ background " << d.events.background->before.raw << " → "
+                  << d.events.background->after.raw << "\n";
+        if (d.events.video)
+            out() << "  ~ video " << d.events.video->before.raw << " → "
+                  << d.events.video->after.raw << "\n";
+        for (const BreakChange& b : d.events.breaks) {
+            if (b.op == ChangeOp::Added)
+                out() << "  + break " << msToClock(b.after.startMs) << "–"
+                      << msToClock(b.after.endMs) << "\n";
+            else if (b.op == ChangeOp::Removed)
+                out() << "  − break " << msToClock(b.before.startMs) << "–"
+                      << msToClock(b.before.endMs) << "\n";
+            else
+                out() << "  ~ break " << msToClock(b.before.startMs) << " end "
+                      << msToClock(b.before.endMs) << " → " << msToClock(b.after.endMs)
+                      << "\n";
+        }
+        if (d.events.storyboardChanged)
+            out() << "  storyboard lines +" << d.events.sbLinesAdded << " −"
+                  << d.events.sbLinesRemoved << "\n";
+    }
+
+    if (!d.timing.isEmpty()) {
+        out() << "Timing\n";
+        for (const TimingChange& t : d.timing) {
+            if (t.op == ChangeOp::Added) {
+                out() << "  + ";
+                renderTimingRow(t.after);
+            }
+            else if (t.op == ChangeOp::Removed) {
+                out() << "  − ";
+                renderTimingRow(t.before);
+            }
+            else {
+                out() << "  ~ " << msToClock(t.timeQ / 1000) << " ";
+                QStringList bits;
+                for (const FieldChange& f : t.fields)
+                    bits << QStringLiteral("%1 %2 → %3")
+                                .arg(QString::fromUtf8(f.key),
+                                     QString::fromUtf8(f.before.raw),
+                                     QString::fromUtf8(f.after.raw));
+                out() << bits.join(", ");
+            }
+            out() << "\n";
+        }
+    }
+
+    int shown = 0;
+    int visible = 0;
+    for (const NoteChange& n : d.notes)
+        if (!n.moveSuppressed) ++visible;
+    if (visible > 0) {
+        out() << "Notes\n";
+        for (const NoteChange& n : d.notes) {
+            if (n.moveSuppressed) continue;
+            if (shown++ == 200) {
+                out() << "  … and " << (visible - 200) << " more\n";
+                break;
+            }
+            if (n.movedFromColumn >= 0) {
+                out() << "  → " << msToClock(n.timeMs) << " col " << n.movedFromColumn
+                      << "→" << n.column << " (moved)\n";
+                continue;
+            }
+            const char* mark = n.op == ChangeOp::Added ? "+" : n.op == ChangeOp::Removed ? "−" : "~";
+            out() << "  " << mark << " " << msToClock(n.timeMs) << " col " << n.column;
+            const CanonicalNote& show = n.op == ChangeOp::Removed ? n.before : n.after;
+            if (show.isHold) out() << " hold →" << msToClock(show.endTimeMs);
+            for (const FieldChange& f : n.fields)
+                out() << "  " << f.key << " " << f.before.raw << " → " << f.after.raw;
+            out() << "\n";
+        }
+    }
+
+    auto renderList = [](const char* name, const ovc::osu::ListDiff& l) {
+        if (l.isEmpty()) return;
+        out() << name << " ";
+        QStringList bits;
+        for (const QByteArray& v : l.added) bits << "+" + QString::fromUtf8(v);
+        for (const QByteArray& v : l.removed) bits << "−" + QString::fromUtf8(v);
+        out() << bits.join(' ') << "\n";
+    };
+    renderList("Bookmarks", d.bookmarks);
+    renderList("Tags", d.tags);
+
+    out() << "— " << d.summary();
+    const auto range = d.affectedTimeRange();
+    if (range.first >= 0)
+        out() << "  (" << msToClock(range.first) << " – " << msToClock(range.second) << ")";
+    out() << "\n";
+    out().flush();
+    return 2;
+}
+
 int runGitCheck()
 {
     using namespace ovc::git;
@@ -189,11 +349,13 @@ int main(int argc, char* argv[])
     if (cmd == "gitcheck") return runGitCheck();
     if (cmd == "parse" && args.size() > 2 && args.at(2) == "--check")
         return runParseCheck(args.mid(3));
+    if (cmd == "diff") return runDiff(args.mid(2));
 
     out() << "usage: ovc-cli <command>\n"
              "  probe                     stream osu! memory-reader state\n"
              "  gitcheck                  print libgit2 version and run a scratch-repo self test\n"
-             "  parse --check <path> [-v] verify lossless round-trip of .osu file(s) or dir\n";
+             "  parse --check <path> [-v] verify lossless round-trip of .osu file(s) or dir\n"
+             "  diff <a.osu> <b.osu>      semantic diff of two difficulties\n";
     out().flush();
     return cmd.isEmpty() ? 0 : 1;
 }

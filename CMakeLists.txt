@@ -16,11 +16,16 @@ qt_add_library(ovc_osu STATIC
     src/osu/parser.cpp
     src/osu/serializer.cpp
     src/osu/peek.cpp
+    src/osu/canonical.cpp
+    src/osu/diff.cpp
     include/osu/token.h
     include/osu/document.h
     include/osu/parser.h
     include/osu/serializer.h
     include/osu/peek.h
+    include/osu/canonical.h
+    include/osu/diff.h
+    include/utils/timefmt.h
 )
 target_include_directories(ovc_osu PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(ovc_osu PUBLIC Qt6::Core)
@@ -84,7 +89,14 @@ target_link_libraries(test_roundtrip PRIVATE ovc_osu Qt6::Test)
 target_compile_definitions(test_roundtrip PRIVATE OVC_CORPUS_DIR="${CMAKE_SOURCE_DIR}/refs")
 add_test(NAME roundtrip COMMAND test_roundtrip)
 
+qt_add_executable(test_diff tests/test_diff.cpp)
+target_link_libraries(test_diff PRIVATE ovc_osu Qt6::Test)
+target_compile_definitions(test_diff PRIVATE OVC_CORPUS_DIR="${CMAKE_SOURCE_DIR}/refs")
+add_test(NAME diff COMMAND test_diff)
+
 if (WIN32 AND WINDEPLOYQT)
-    add_custom_command(TARGET test_roundtrip POST_BUILD
-        COMMAND "${WINDEPLOYQT}" --no-translations "$<TARGET_FILE:test_roundtrip>")
+    foreach(tgt test_roundtrip test_diff)
+        add_custom_command(TARGET ${tgt} POST_BUILD
+            COMMAND "${WINDEPLOYQT}" --no-translations "$<TARGET_FILE:${tgt}>")
+    endforeach()
 endif()
