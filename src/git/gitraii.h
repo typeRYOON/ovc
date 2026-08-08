@@ -30,6 +30,12 @@ public:
         return &m_p;
     }
     T* get() const { return m_p; }
+    T* release()
+    {
+        T* p = m_p;
+        m_p = nullptr;
+        return p;
+    }
     operator T*() const { return m_p; }
     explicit operator bool() const { return m_p != nullptr; }
     void reset()

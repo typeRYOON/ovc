@@ -33,8 +33,20 @@ target_link_libraries(ovc_osu PUBLIC Qt6::Core)
 # -- git store: libgit2 confined to this target's sources ---------------------
 qt_add_library(ovc_git STATIC
     src/git/gitcheck.cpp
+    src/git/paths.cpp
+    src/git/shadowrepo.cpp
+    src/git/mirror.cpp
+    src/git/setdiff.cpp
+    src/git/registry.cpp
+    src/git/ops.cpp
     src/git/gitraii.h
     include/git/gitcheck.h
+    include/git/paths.h
+    include/git/shadowrepo.h
+    include/git/mirror.h
+    include/git/setdiff.h
+    include/git/registry.h
+    include/git/ops.h
 )
 target_include_directories(ovc_git PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(ovc_git
@@ -94,8 +106,12 @@ target_link_libraries(test_diff PRIVATE ovc_osu Qt6::Test)
 target_compile_definitions(test_diff PRIVATE OVC_CORPUS_DIR="${CMAKE_SOURCE_DIR}/refs")
 add_test(NAME diff COMMAND test_diff)
 
+qt_add_executable(test_store tests/test_store.cpp)
+target_link_libraries(test_store PRIVATE ovc_git Qt6::Test)
+add_test(NAME store COMMAND test_store)
+
 if (WIN32 AND WINDEPLOYQT)
-    foreach(tgt test_roundtrip test_diff)
+    foreach(tgt test_roundtrip test_diff test_store)
         add_custom_command(TARGET ${tgt} POST_BUILD
             COMMAND "${WINDEPLOYQT}" --no-translations "$<TARGET_FILE:${tgt}>")
     endforeach()

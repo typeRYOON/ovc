@@ -1,4 +1,7 @@
 #include <git/gitcheck.h>
+#include <git/ops.h>
+#include <git/paths.h>
+#include <git/registry.h>
 #include <osu/canonical.h>
 #include <osu/diff.h>
 #include <osu/parser.h>
@@ -323,6 +326,84 @@ int runDiff(const QStringList& args)
     return 2;
 }
 
+ovc::git::MapsetEntry* resolveEntry(ovc::git::Registry& reg, const QString& arg)
+{
+    if (auto* e = reg.findByRepoId(arg)) return e;
+    return reg.findBySongsPath(arg);
+}
+
+int runTrack(const QStringList& args)
+{
+    if (args.isEmpty()) {
+        out() << "usage: ovc-cli track <mapset folder>\n";
+        return 1;
+    }
+    QString err;
+    const auto entry = ovc::git::trackMapset(args.first(), &err);
+    if (!entry) {
+        out() << "track failed: " << err << "\n";
+        return 1;
+    }
+    out() << "tracked " << entry->artist << " - " << entry->title << " (" << entry->creator
+          << ")\n  repoId " << entry->repoId << "\n  repo   " << entry->repoDir() << "\n";
+    out().flush();
+    return 0;
+}
+
+int runSnapshot(const QStringList& args)
+{
+    if (args.isEmpty()) {
+        out() << "usage: ovc-cli snapshot <repoId|mapset folder>\n";
+        return 1;
+    }
+    ovc::git::Registry reg = ovc::git::Registry::load();
+    const auto* entry = resolveEntry(reg, args.first());
+    if (!entry) {
+        out() << "not tracked: " << args.first() << "\n";
+        return 1;
+    }
+    QString err;
+    const auto res = ovc::git::snapshotMapset(*entry, QStringLiteral("manual"), {}, &err);
+    if (!res) {
+        if (!err.isEmpty()) {
+            out() << "snapshot failed: " << err << "\n";
+            return 1;
+        }
+        out() << "no changes\n";
+        return 0;
+    }
+    out() << res->commitOid.left(7) << "  " << res->subject << "\n";
+    out().flush();
+    return 0;
+}
+
+int runLog(const QStringList& args)
+{
+    if (args.isEmpty()) {
+        out() << "usage: ovc-cli log <repoId|mapset folder>\n";
+        return 1;
+    }
+    ovc::git::Registry reg = ovc::git::Registry::load();
+    const auto* entry = resolveEntry(reg, args.first());
+    if (!entry) {
+        out() << "not tracked: " << args.first() << "\n";
+        return 1;
+    }
+    auto repo = ovc::git::ShadowRepo::open(entry->repoDir());
+    if (!repo) {
+        out() << "repo missing: " << entry->repoDir() << "\n";
+        return 1;
+    }
+    const auto commits = repo->log(200);
+    for (const auto& c : commits) {
+        out() << c.oid.left(7) << "  " << c.when.toLocalTime().toString("yyyy-MM-dd HH:mm:ss")
+              << "  " << c.subject << "\n";
+    }
+    out() << commits.size() << " snapshots\n";
+    out().flush();
+    return 0;
+}
+
 int runGitCheck()
 {
     using namespace ovc::git;
@@ -350,12 +431,18 @@ int main(int argc, char* argv[])
     if (cmd == "parse" && args.size() > 2 && args.at(2) == "--check")
         return runParseCheck(args.mid(3));
     if (cmd == "diff") return runDiff(args.mid(2));
+    if (cmd == "track") return runTrack(args.mid(2));
+    if (cmd == "snapshot") return runSnapshot(args.mid(2));
+    if (cmd == "log") return runLog(args.mid(2));
 
     out() << "usage: ovc-cli <command>\n"
              "  probe                     stream osu! memory-reader state\n"
              "  gitcheck                  print libgit2 version and run a scratch-repo self test\n"
              "  parse --check <path> [-v] verify lossless round-trip of .osu file(s) or dir\n"
-             "  diff <a.osu> <b.osu>      semantic diff of two difficulties\n";
+             "  diff <a.osu> <b.osu>      semantic diff of two difficulties\n"
+             "  track <folder>            start tracking a mapset folder (shadow repo + import)\n"
+             "  snapshot <id|folder>      mirror + commit current state if changed\n"
+             "  log <id|folder>           list snapshots of a tracked mapset\n";
     out().flush();
     return cmd.isEmpty() ? 0 : 1;
 }
