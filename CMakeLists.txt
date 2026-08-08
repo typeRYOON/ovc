@@ -60,11 +60,15 @@ qt_add_library(ovc_watch STATIC
     src/watch/memoryscan.cpp
     src/watch/stablereader.cpp
     src/watch/gamewatcher.cpp
+    src/watch/songsbinder.cpp
+    src/watch/trackingservice.cpp
     include/watch/processhandle.h
     include/watch/memoryscan.h
     include/watch/osustate.h
     include/watch/stablereader.h
     include/watch/gamewatcher.h
+    include/watch/songsbinder.h
+    include/watch/trackingservice.h
 )
 target_include_directories(ovc_watch PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(ovc_watch PUBLIC Qt6::Core Qt6::Concurrent ovc_git)
@@ -110,8 +114,12 @@ qt_add_executable(test_store tests/test_store.cpp)
 target_link_libraries(test_store PRIVATE ovc_git Qt6::Test)
 add_test(NAME store COMMAND test_store)
 
+qt_add_executable(test_pipeline tests/test_pipeline.cpp)
+target_link_libraries(test_pipeline PRIVATE ovc_watch Qt6::Test)
+add_test(NAME pipeline COMMAND test_pipeline)
+
 if (WIN32 AND WINDEPLOYQT)
-    foreach(tgt test_roundtrip test_diff test_store)
+    foreach(tgt test_roundtrip test_diff test_store test_pipeline)
         add_custom_command(TARGET ${tgt} POST_BUILD
             COMMAND "${WINDEPLOYQT}" --no-translations "$<TARGET_FILE:${tgt}>")
     endforeach()

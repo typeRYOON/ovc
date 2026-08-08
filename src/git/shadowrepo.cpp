@@ -231,6 +231,23 @@ QList<ShadowRepo::CommitInfo> ShadowRepo::log(int limit) const
     return out;
 }
 
+std::optional<ShadowRepo::CommitInfo> ShadowRepo::commitInfo(const QByteArray& commitOid) const
+{
+    git_oid oid;
+    if (!oidFromHex(commitOid, &oid)) return std::nullopt;
+    CommitPtr commit;
+    if (git_commit_lookup(commit.out(), m_repo, &oid) != 0) return std::nullopt;
+    CommitInfo info;
+    info.oid = commitOid;
+    if (git_commit_parentcount(commit) > 0)
+        info.parentOid = oidToHex(git_commit_parent_id(commit, 0));
+    info.when = QDateTime::fromSecsSinceEpoch(git_commit_time(commit));
+    const QString message = QString::fromUtf8(git_commit_message(commit));
+    info.subject = message.section('\n', 0, 0);
+    info.trailers = parseTrailers(message);
+    return info;
+}
+
 QList<QPair<QString, QByteArray>> ShadowRepo::listTree(const QByteArray& oid) const
 {
     QList<QPair<QString, QByteArray>> out;

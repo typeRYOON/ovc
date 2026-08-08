@@ -81,6 +81,8 @@ bool StableReader::readBeatmap(MemBeatmap& out) const
     out.title = m_proc.readCsharpStringPtr(beatmapAddr + 0x24);
     out.titleUnicode = m_proc.readCsharpStringPtr(beatmapAddr + 0x28);
     out.version = m_proc.readCsharpStringPtr(beatmapAddr + 0xac);
+    out.mapId = m_proc.readInt(beatmapAddr + 0xc8);
+    out.setId = m_proc.readInt(beatmapAddr + 0xcc);
 
     // Songs is stored relative to the install dir by default (literally
     // "Songs"); users can point it anywhere absolute. Path translation uses

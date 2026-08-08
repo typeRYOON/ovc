@@ -8,6 +8,7 @@
 #include <osu/serializer.h>
 #include <utils/timefmt.h>
 #include <watch/gamewatcher.h>
+#include <watch/trackingservice.h>
 #include <QCoreApplication>
 #include <QDirIterator>
 #include <QElapsedTimer>
@@ -15,6 +16,11 @@
 #include <QFileInfo>
 #include <QTextStream>
 #include <QTimer>
+
+#ifdef Q_OS_WIN
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 // Dev/test CLI. `probe` streams live memory-reader state; `gitcheck` proves
 // the libgit2 link. More commands land with later milestones (parse, diff,
@@ -326,6 +332,172 @@ int runDiff(const QStringList& args)
     return 2;
 }
 
+// Save-behavior spike: raw ReadDirectoryChangesW event log with timings, to
+// see exactly what osu!'s editor does on save (rewrite? temp+rename? bursts?).
+int runFswatch(const QStringList& args)
+{
+#ifndef Q_OS_WIN
+    out() << "fswatch is Windows-only\n";
+    return 1;
+#else
+    if (args.isEmpty()) {
+        out() << "usage: ovc-cli fswatch <folder>\n";
+        return 1;
+    }
+    const QString dir = QDir::toNativeSeparators(args.first());
+    HANDLE h = CreateFileW(reinterpret_cast<const wchar_t*>(dir.utf16()), FILE_LIST_DIRECTORY,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        out() << "cannot open " << dir << "\n";
+        return 1;
+    }
+    out() << "watching " << dir << " (Ctrl+C to quit)\n";
+    out().flush();
+
+    QElapsedTimer clock;
+    clock.start();
+    qint64 lastMs = -1;
+    alignas(DWORD) char buf[64 * 1024];
+    while (true) {
+        DWORD bytes = 0;
+        if (!ReadDirectoryChangesW(h, buf, sizeof(buf), TRUE,
+                                   FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME |
+                                       FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE |
+                                       FILE_NOTIFY_CHANGE_CREATION,
+                                   &bytes, nullptr, nullptr)) {
+            out() << "ReadDirectoryChangesW failed\n";
+            return 1;
+        }
+        const qint64 now = clock.elapsed();
+        const char* p = buf;
+        while (true) {
+            const auto* info = reinterpret_cast<const FILE_NOTIFY_INFORMATION*>(p);
+            const char* action = "?";
+            switch (info->Action) {
+            case FILE_ACTION_ADDED: action = "ADDED   "; break;
+            case FILE_ACTION_REMOVED: action = "REMOVED "; break;
+            case FILE_ACTION_MODIFIED: action = "MODIFIED"; break;
+            case FILE_ACTION_RENAMED_OLD_NAME: action = "REN_OLD "; break;
+            case FILE_ACTION_RENAMED_NEW_NAME: action = "REN_NEW "; break;
+            }
+            const QString name = QString::fromWCharArray(
+                info->FileName, static_cast<int>(info->FileNameLength / sizeof(wchar_t)));
+            out() << QString::asprintf("%8lld ms  %s+%-5lld  %s  ", now,
+                                       lastMs < 0 ? "" : "\xce\x94", lastMs < 0 ? 0 : now - lastMs,
+                                       action)
+                  << name << "\n";
+            if (info->NextEntryOffset == 0) break;
+            p += info->NextEntryOffset;
+        }
+        lastMs = now;
+        out().flush();
+    }
+#endif
+}
+
+int runWatch(QCoreApplication& app)
+{
+    using namespace ovc::watch;
+    out() << "watch: full tracking loop (Ctrl+C to quit)\n";
+    out().flush();
+
+    GameWatcher watcher;
+    TrackingService svc;
+    QObject::connect(&watcher, &GameWatcher::beatmapChanged, &svc,
+                     &TrackingService::onBeatmapChanged);
+    QObject::connect(&watcher, &GameWatcher::beatmapCleared, &svc,
+                     &TrackingService::onBeatmapCleared);
+    QObject::connect(&watcher, &GameWatcher::stateChanged, &svc,
+                     &TrackingService::onStateChanged);
+    svc.setEditorTimeProvider([&watcher]() { return watcher.editorTimeMs(); });
+
+    QObject::connect(&watcher, &GameWatcher::attachedChanged, [](bool on) {
+        out() << (on ? "[attach] connected" : "[attach] lost") << "\n";
+        out().flush();
+    });
+    QObject::connect(&svc, &TrackingService::activeMapsetChanged, [&svc](const QString& rid) {
+        if (rid.isEmpty()) {
+            const auto& m = svc.currentBeatmap();
+            if (!m.folder.isEmpty())
+                out() << "[map] untracked: " << m.folder << "  (track with: ovc-cli track \""
+                      << m.songsDir << "/" << m.folder << "\")\n";
+        }
+        else {
+            out() << "[map] tracking " << rid << "\n";
+        }
+        out().flush();
+    });
+    QObject::connect(&svc, &TrackingService::snapshotTaken,
+                     [](const QString&, const QString& subject, const QByteArray& oid) {
+                         out() << "[snap] " << oid.left(7) << "  " << subject << "\n";
+                         out().flush();
+                     });
+    QObject::connect(&svc, &TrackingService::snapshotFailed,
+                     [](const QString&, const QString& reason) {
+                         out() << "[snap] FAILED: " << reason << "\n";
+                         out().flush();
+                     });
+    return app.exec();
+}
+
+int runRestore(const QStringList& args)
+{
+    using namespace ovc::watch;
+    if (args.size() < 2) {
+        out() << "usage: ovc-cli restore <repoId|folder> <commit> [--force]\n";
+        return 1;
+    }
+    const bool force = args.contains("--force");
+    ovc::git::Registry reg = ovc::git::Registry::load();
+    ovc::git::MapsetEntry* entry = reg.findByRepoId(args.at(0));
+    if (!entry) entry = reg.findBySongsPath(args.at(0));
+    if (!entry) {
+        out() << "not tracked: " << args.at(0) << "\n";
+        return 1;
+    }
+
+    // Refuse while osu! is editing this very mapset (it would overwrite the
+    // restored files on its next save).
+    if (!force) {
+        const auto pids = ProcessHandle::findProcesses({QStringLiteral("osu!.exe")});
+        if (!pids.empty()) {
+            ProcessHandle proc;
+            if (proc.open(pids.front()) && !proc.is64bit()) {
+                StableReader reader(proc);
+                out() << "checking osu! state…\n";
+                out().flush();
+                if (reader.resolve() && reader.status() == GameState::Edit) {
+                    MemBeatmap m;
+                    if (reader.readBeatmap(m) &&
+                        QDir::cleanPath(m.songsDir + "/" + m.folder)
+                                .compare(QDir::cleanPath(entry->songsPath),
+                                         Qt::CaseInsensitive) == 0) {
+                        out() << "refused: osu! is editing this mapset right now. Close the "
+                                 "editor (or pass --force).\n";
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
+
+    QString err;
+    const auto res = ovc::git::restoreMapset(*entry, args.at(1).toUtf8(), &err);
+    if (!res) {
+        if (!err.isEmpty()) {
+            out() << "restore failed: " << err << "\n";
+            return 1;
+        }
+        out() << "already at that state\n";
+        return 0;
+    }
+    out() << res->commitOid.left(7) << "  " << res->subject << "\n"
+          << "Press F5 in song select before reopening the map in osu!.\n";
+    out().flush();
+    return 0;
+}
+
 ovc::git::MapsetEntry* resolveEntry(ovc::git::Registry& reg, const QString& arg)
 {
     if (auto* e = reg.findByRepoId(arg)) return e;
@@ -434,15 +606,21 @@ int main(int argc, char* argv[])
     if (cmd == "track") return runTrack(args.mid(2));
     if (cmd == "snapshot") return runSnapshot(args.mid(2));
     if (cmd == "log") return runLog(args.mid(2));
+    if (cmd == "fswatch") return runFswatch(args.mid(2));
+    if (cmd == "watch") return runWatch(app);
+    if (cmd == "restore") return runRestore(args.mid(2));
 
     out() << "usage: ovc-cli <command>\n"
              "  probe                     stream osu! memory-reader state\n"
+             "  watch                     full tracking loop: auto-snapshot the active mapset\n"
              "  gitcheck                  print libgit2 version and run a scratch-repo self test\n"
              "  parse --check <path> [-v] verify lossless round-trip of .osu file(s) or dir\n"
              "  diff <a.osu> <b.osu>      semantic diff of two difficulties\n"
              "  track <folder>            start tracking a mapset folder (shadow repo + import)\n"
              "  snapshot <id|folder>      mirror + commit current state if changed\n"
-             "  log <id|folder>           list snapshots of a tracked mapset\n";
+             "  log <id|folder>           list snapshots of a tracked mapset\n"
+             "  restore <id|folder> <oid> write an old snapshot back into the Songs folder\n"
+             "  fswatch <folder>          log raw filesystem events (save-behavior spike)\n";
     out().flush();
     return cmd.isEmpty() ? 0 : 1;
 }

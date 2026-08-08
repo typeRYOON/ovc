@@ -16,6 +16,8 @@ struct MemBeatmap {
     QString version;
     QString osuPath; // host filesystem path to the .osu
     QString songsDir;
+    int mapId = -1; // -1 when unsubmitted
+    int setId = -1;
 };
 
 // Required: the currently selected beatmap + game status + songs folder.

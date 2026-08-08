@@ -22,6 +22,13 @@ std::optional<MapsetEntry> trackMapset(const QString& songsDir, QString* err);
 // (autosave | manual | import | pre-restore | restore).
 std::optional<SnapshotResult> snapshotMapset(const MapsetEntry& entry, const QString& trigger,
                                              const QMap<QString, QString>& extraTrailers,
-                                             QString* err);
+                                             QString* err, const QString& subjectOverride = {});
+
+// Write a commit's tree back into the Songs folder (tmp+replace per file,
+// tracked-but-absent files deleted, unknown junk left alone), after a
+// pre-restore safety snapshot if dirty. The restored state lands as a NEW
+// commit. nullopt with empty err = Songs already matched that commit.
+std::optional<SnapshotResult> restoreMapset(const MapsetEntry& entry, const QByteArray& commitOid,
+                                            QString* err);
 
 } // namespace ovc::git

@@ -47,6 +47,7 @@ public:
     QByteArray headOid() const;     // hex commit oid; empty on unborn
     QByteArray headTreeOid() const; // hex tree oid; empty on unborn
     QList<CommitInfo> log(int limit = 1000) const; // first-parent, newest first
+    std::optional<CommitInfo> commitInfo(const QByteArray& commitOid) const;
 
     // Accepts a commit or tree oid. relPath -> blob hex oid.
     QList<QPair<QString, QByteArray>> listTree(const QByteArray& oid) const;

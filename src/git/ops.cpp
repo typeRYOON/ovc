@@ -116,7 +116,7 @@ std::optional<MapsetEntry> trackMapset(const QString& songsDir, QString* err)
 
 std::optional<SnapshotResult> snapshotMapset(const MapsetEntry& entry, const QString& trigger,
                                              const QMap<QString, QString>& extraTrailers,
-                                             QString* err)
+                                             QString* err, const QString& subjectOverride)
 {
     if (err) err->clear();
     auto repo = ShadowRepo::open(entry.repoDir());
@@ -158,10 +158,72 @@ std::optional<SnapshotResult> snapshotMapset(const MapsetEntry& entry, const QSt
         trailers.insert(QStringLiteral("Ovc-Time-Range"),
                         QStringLiteral("%1-%2").arg(lo).arg(hi));
 
-    res.subject = triggerPrefix(trigger) + res.diff.subjectLine();
+    res.subject = subjectOverride.isEmpty() ? triggerPrefix(trigger) + res.diff.subjectLine()
+                                            : subjectOverride;
     res.commitOid = repo->commitStaged(*tree, res.subject, trailers, err);
     if (res.commitOid.isEmpty()) return std::nullopt;
     return res;
+}
+
+std::optional<SnapshotResult> restoreMapset(const MapsetEntry& entry, const QByteArray& commitOid,
+                                            QString* err)
+{
+    if (err) err->clear();
+    auto repo = ShadowRepo::open(entry.repoDir());
+    if (!repo) {
+        if (err) *err = QStringLiteral("repo missing: ") + entry.repoDir();
+        return std::nullopt;
+    }
+    const auto targetInfo = repo->commitInfo(commitOid);
+    if (!targetInfo) {
+        if (err) *err = QStringLiteral("unknown commit ") + commitOid;
+        return std::nullopt;
+    }
+
+    auto isInfra = [](const QString& p) {
+        return p == QStringLiteral(".gitattributes") || p.startsWith(QStringLiteral(".ovc/"));
+    };
+
+    // Safety net: whatever is in Songs right now gets its own commit first.
+    snapshotMapset(entry, QStringLiteral("pre-restore"), {}, err);
+    if (err && !err->isEmpty()) return std::nullopt;
+
+    QSet<QString> targetPaths;
+    for (const auto& [relPath, blobOid] : repo->listTree(commitOid)) {
+        if (isInfra(relPath)) continue; // repo metadata never materializes Songs-side
+        targetPaths.insert(relPath);
+        const QString dest = entry.songsPath + QLatin1Char('/') + relPath;
+        QDir().mkpath(QFileInfo(dest).absolutePath());
+        const QString tmp = dest + QStringLiteral(".ovctmp");
+        QFile f(tmp);
+        if (!f.open(QIODevice::WriteOnly) || f.write(repo->readBlob(blobOid)) < 0) {
+            if (err) *err = QStringLiteral("cannot write ") + tmp;
+            return std::nullopt;
+        }
+        f.close();
+        if (QFile::exists(dest)) QFile::remove(dest);
+        if (!QFile::rename(tmp, dest)) {
+            if (err) *err = QStringLiteral("cannot replace ") + dest;
+            return std::nullopt;
+        }
+    }
+
+    // Files the repo tracks now but the target lacks: remove from Songs.
+    // Anything the repo has never seen stays untouched.
+    for (const auto& [relPath, blobOid] : repo->listTree(repo->headOid())) {
+        Q_UNUSED(blobOid)
+        if (isInfra(relPath) || targetPaths.contains(relPath)) continue;
+        QFile::remove(entry.songsPath + QLatin1Char('/') + relPath);
+    }
+
+    const QString subject =
+        QStringLiteral("[restore] State of %1 (%2)")
+            .arg(targetInfo->when.toLocalTime().toString(QStringLiteral("MMM d, HH:mm")),
+                 QString::fromUtf8(commitOid.left(7)));
+    return snapshotMapset(entry, QStringLiteral("restore"),
+                          {{QStringLiteral("Ovc-Restored-From"),
+                            QString::fromUtf8(commitOid.left(7))}},
+                          err, subject);
 }
 
 } // namespace ovc::git
