@@ -258,6 +258,12 @@ MainWindow::MainWindow(TrackingService& service, GameWatcher& watcher,
                 [this](int) { refreshServerPill(); });
         connect(m_server, &ovc::serve::LocalServer::runningChanged, this,
                 [this](bool) { refreshServerPill(); });
+        // A write made from the web viewer (rename / restore / merge) → mirror it
+        // in the desktop's snapshot list so both stay in sync.
+        connect(m_server, &ovc::serve::LocalServer::repoChanged, this,
+                [this](const QString& repoId) {
+                    if (repoId == selectedRepoId()) loadSnapshots();
+                });
     }
     // A pending merge resolved (or cancelled) in the web viewer → refresh the
     // snapshot list if it was for the selected mapset.

@@ -7,7 +7,7 @@ parses `.osu`, so instead of "line 412 changed" you get *"OD 8 → 9," "+3 notes
 
 - **Viewer:** <https://ryoon.moe/ovc>
 - **Write-up:** <https://ryoon.moe/blog/ovc>
-- **YouTube Explanation:** <https://youtube.com>
+- **YouTube Explanation:** <https://www.youtube.com/watch?v=bQdShXsNiWQ>
 
 > Windows only for now. Reads osu! **stable**; lazer works through a staging folder (see the write-up).
 
@@ -37,14 +37,6 @@ powershell -ExecutionPolicy Bypass -File scripts\dist-win.ps1
 Builds Release, stages `ovc.exe` + `ovc-cli.exe` with their Qt/MSVC runtime via `windeployqt`, and
 writes `dist\ovc-<version>-win-x64.zip`. Pass `-SkipBuild` to package an existing build, or
 `-QtBin <path>` if Qt isn't at the default location.
-
-## How it works
-
-Each tracked set gets its own shadow git repo (via [libgit2](https://libgit2.org/)), kept separate
-from your Songs folder — ovc mirrors your files in on save and commits. Diffs and 3-way merges run on
-a canonicalized parse of the `.osu`, so they understand the map rather than the bytes. The merge base
-is found by shared **content** (blob hash), not shared commits, so collabs seeded from a plain `.osz`
-merge cleanly even across an upload.
 
 ## License
 

@@ -47,6 +47,9 @@ public:
 signals:
     void clientCountChanged(int count);
     void runningChanged(bool running);
+    // A web-triggered write (label / restore / merge-resolve) landed on this
+    // repo — the desktop UI listens so it reflects changes made from the viewer.
+    void repoChanged(const QString& repoId);
 
 private:
     bool authorized(const QHttpServerRequest& request) const;

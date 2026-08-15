@@ -396,6 +396,7 @@ void LocalServer::setupRoutes()
                                        {QStringLiteral("repoId"), repoId},
                                        {QStringLiteral("subject"), QStringLiteral("restore")},
                                        {QStringLiteral("oid"), QString::fromUtf8(newOid)}});
+                            emit repoChanged(repoId); // refresh the desktop list too
                         });
                     }
                     return json(QJsonObject{
@@ -429,6 +430,7 @@ void LocalServer::setupRoutes()
                              err.isEmpty() ? QStringLiteral("could not set label") : err);
             const QString stored = repo->labelFor(oid.toUtf8()); // setLabel trims
             announceSnapshotLabeled(repoId, oid, stored);
+            emit repoChanged(repoId); // refresh the desktop list too
             return json(QJsonObject{{QStringLiteral("labeled"), true},
                                     {QStringLiteral("label"), stored}});
         });
@@ -506,6 +508,7 @@ void LocalServer::setupRoutes()
                                    {QStringLiteral("repoId"), repoId},
                                    {QStringLiteral("subject"), QStringLiteral("merge")},
                                    {QStringLiteral("oid"), QString::fromUtf8(oid)}});
+                    emit repoChanged(repoId); // refresh the desktop list too
                 });
                 return json(QJsonObject{{QStringLiteral("applied"), true},
                                         {QStringLiteral("snapshotOid"),
