@@ -61,7 +61,10 @@ private slots:
     void saveProducesOneCommit();
     void burstCollapsesToOneCommit();
     void noChangeRewriteNoCommit();
+    void namedManualSnapshotGetsLabel();
     void renameRebindsViaContentProbe();
+    void uploadRebindsAfterIdStamp();
+    void relinkRepointsManually();
     void preflightBlocksEditor();
     void restoreRoundTrip();
 
@@ -159,6 +162,32 @@ void TestPipeline::noChangeRewriteNoCommit()
     QCOMPARE(failed.count(), 0);
 }
 
+void TestPipeline::namedManualSnapshotGetsLabel()
+{
+    const QString folder = QStringLiteral("99 T - A");
+    const QString dir = m_songs.path() + '/' + folder;
+
+    TrackingService svc;
+    svc.binder().setTimings(100, 30);
+    QSignalSpy taken(&svc, &TrackingService::snapshotTaken);
+    svc.onBeatmapChanged(fakeMem(m_songs.path(), folder, 11, 99));
+    const QString rid = svc.activeRepoId();
+    QVERIFY(!rid.isEmpty());
+
+    // Change something, then snapshot with a name (git commit -m style).
+    QVERIFY(writeFile(dir + "/T - A (C) [VA].osu",
+                      osuFixture(11, 99, "VA", "36,192,1700,1,0,0:0:0:0:\n")));
+    svc.requestManualSnapshot(rid, QStringLiteral("before the rework"));
+    QTRY_COMPARE_WITH_TIMEOUT(taken.count(), 1, 8000);
+
+    const QByteArray oid = taken.last().at(2).toByteArray();
+    ovc::git::Registry reg = ovc::git::Registry::load();
+    auto repo = ShadowRepo::open(reg.findByRepoId(rid)->repoDir());
+    QCOMPARE(repo->labelFor(oid), QStringLiteral("before the rework"));
+    // The auto semantic subject is still there as detail.
+    QVERIFY(repo->commitInfo(oid)->subject.contains("VA"));
+}
+
 void TestPipeline::renameRebindsViaContentProbe()
 {
     // Unsubmitted set (-1 ids): only the content probe can match it.
@@ -186,6 +215,77 @@ void TestPipeline::renameRebindsViaContentProbe()
     const auto* e = reg.findByRepoId(entry->repoId);
     QVERIFY(e);
     QCOMPARE(QDir::cleanPath(e->songsPath), QDir::cleanPath(m_songs.path() + '/' + newFolder));
+}
+
+void TestPipeline::uploadRebindsAfterIdStamp()
+{
+    // Track a WIP set, then simulate an UPLOAD: osu! renames the folder to
+    // "<setId> ..." AND stamps the assigned BeatmapID/BeatmapSetID into the .osu.
+    // Every id/path anchor moves at once; only the ID-insensitive fingerprint
+    // keeps the folder tied to its pre-upload history. ("UP" version is unique so
+    // the probe can't collide with fixtures from sibling tests.)
+    const QString folder = QStringLiteral("up_wip");
+    const QString dir = m_songs.path() + '/' + folder;
+    QVERIFY(writeFile(dir + "/up [UP].osu", osuFixture(-1, -1, "UP")));
+
+    TrackingService svc;
+    svc.binder().setTimings(100, 30);
+    svc.onBeatmapChanged(fakeMem(m_songs.path(), folder, -1, -1));
+    QString err;
+    const auto entry = svc.trackCurrentMapset(&err);
+    QVERIFY2(entry.has_value(), qPrintable(err));
+
+    const QString newFolder = QStringLiteral("up_submitted"); // unique in the shared temp dir
+    QVERIFY(QDir(m_songs.path()).rename(folder, newFolder));
+    const QString newDir = m_songs.path() + '/' + newFolder;
+    // IDs unique across the suite: a real set ID is globally unique, so findBySetId
+    // must NOT short-circuit to a sibling fixture before the fingerprint probe runs.
+    QVERIFY(writeFile(newDir + "/up [UP].osu", osuFixture(543, 12345, "UP"))); // IDs stamped in
+
+    QSignalSpy active(&svc, &TrackingService::activeMapsetChanged);
+    svc.onBeatmapChanged(fakeMem(m_songs.path(), newFolder, 543, 12345));
+    QCOMPARE(svc.activeRepoId(), entry->repoId); // same set, recognised through the stamp
+    QCOMPARE(active.count(), 0);                 // no untracked flap
+
+    // Self-heal followed the rename and learned the real IDs.
+    ovc::git::Registry reg = ovc::git::Registry::load();
+    const auto* e = reg.findByRepoId(entry->repoId);
+    QVERIFY(e);
+    QCOMPARE(QDir::cleanPath(e->songsPath), QDir::cleanPath(newDir));
+    QCOMPARE(e->beatmapSetId, 12345);
+    QVERIFY(e->beatmapIds.contains(543));
+}
+
+void TestPipeline::relinkRepointsManually()
+{
+    // The escape hatch: an upload that also reworked the map diverges too far for
+    // the fingerprint, so the mapper relinks by hand. relink() re-points the entry
+    // and refreshes the IDs from the new folder regardless of auto-detection.
+    const QString folder = QStringLiteral("rl_wip");
+    const QString dir = m_songs.path() + '/' + folder;
+    QVERIFY(writeFile(dir + "/rl [RL].osu", osuFixture(-1, -1, "RL")));
+
+    TrackingService svc;
+    svc.binder().setTimings(100, 30);
+    svc.onBeatmapChanged(fakeMem(m_songs.path(), folder, -1, -1));
+    QString err;
+    const auto entry = svc.trackCurrentMapset(&err);
+    QVERIFY2(entry.has_value(), qPrintable(err));
+
+    const QString newFolder = QStringLiteral("77 T - A");
+    QVERIFY(QDir(m_songs.path()).rename(folder, newFolder));
+    const QString newDir = m_songs.path() + '/' + newFolder;
+    QVERIFY(writeFile(newDir + "/rl [RL].osu",
+                      osuFixture(11, 77, "RL", "256,192,2000,1,0,0:0:0:0:\n")));
+
+    QVERIFY2(svc.relink(entry->repoId, newDir, &err), qPrintable(err));
+
+    ovc::git::Registry reg = ovc::git::Registry::load();
+    const auto* e = reg.findByRepoId(entry->repoId);
+    QVERIFY(e);
+    QCOMPARE(QDir::cleanPath(e->songsPath), QDir::cleanPath(newDir));
+    QCOMPARE(e->beatmapSetId, 77);
+    QVERIFY(e->beatmapIds.contains(11));
 }
 
 void TestPipeline::preflightBlocksEditor()

@@ -28,6 +28,7 @@ public:
     MapsetEntry* findBySongsPath(const QString& path);
     MapsetEntry* findBySetId(int setId);
     MapsetEntry* findByBeatmapId(int beatmapId);
+    bool removeByRepoId(const QString& repoId); // drop the entry; true if one was found
 
     QString newRepoId() const; // sortable timestamp + random suffix
 

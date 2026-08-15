@@ -2,14 +2,20 @@
 #include <git/ops.h>
 #include <git/paths.h>
 #include <git/registry.h>
-#include <osu/canonical.h>
-#include <osu/diff.h>
-#include <osu/parser.h>
-#include <osu/serializer.h>
-#include <utils/timefmt.h>
+#include <ovccore/canonical.h>
+#include <ovccore/diff.h>
+#include <ovccore/json.h>
+#include <ovccore/merge.h>
+#include <ovccore/parser.h>
+#include <ovccore/timefmt.h>
+#include <git/bundle.h>
+#include <git/mergesessions.h>
+#include <serve/localserver.h>
+#include <utils/config.h>
 #include <watch/gamewatcher.h>
 #include <watch/trackingservice.h>
 #include <QCoreApplication>
+#include <QDir>
 #include <QDirIterator>
 #include <QElapsedTimer>
 #include <QFile>
@@ -19,6 +25,7 @@
 
 #ifdef Q_OS_WIN
 #define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
 #include <windows.h>
 #endif
 
@@ -101,11 +108,21 @@ int runProbe(QCoreApplication& app)
     return app.exec();
 }
 
-qsizetype firstDiff(const QByteArray& a, const QByteArray& b)
+QString qs(const std::string& s)
 {
-    const qsizetype n = qMin(a.size(), b.size());
-    for (qsizetype i = 0; i < n; ++i)
-        if (a.at(i) != b.at(i)) return i;
+    return QString::fromStdString(s);
+}
+
+std::string_view sv(const QByteArray& b)
+{
+    return {b.constData(), size_t(b.size())};
+}
+
+size_t firstDiff(std::string_view a, std::string_view b)
+{
+    const size_t n = std::min(a.size(), b.size());
+    for (size_t i = 0; i < n; ++i)
+        if (a[i] != b[i]) return i;
     return n; // sizes differ
 }
 
@@ -144,22 +161,22 @@ int runParseCheck(const QStringList& args)
         const QByteArray input = f.readAll();
         bytes += input.size();
 
-        const auto res = ovc::osu::parseOsu(input);
-        const QByteArray output = ovc::osu::serializeOsu(res.doc);
+        const auto res = ovc::core::parseOsu(sv(input));
+        const std::string output = ovc::core::serializeOsu(res.doc);
         ++versions[res.doc.formatVersion];
 
-        if (output != input) {
+        if (output != sv(input)) {
             ++mismatches;
             out() << "MISMATCH " << path << "\n         first divergence at byte "
-                  << firstDiff(input, output) << " (in " << input.size() << ", out "
-                  << output.size() << ")\n";
+                  << qint64(firstDiff(sv(input), output)) << " (in " << input.size()
+                  << ", out " << qint64(output.size()) << ")\n";
         }
-        if (!res.warnings.isEmpty()) {
+        if (!res.warnings.empty()) {
             ++warned;
             if (verbose) {
                 out() << "WARN     " << path << "\n";
                 for (const auto& w : res.warnings)
-                    out() << "         line " << w.lineNo << ": " << w.message << "\n";
+                    out() << "         line " << w.lineNo << ": " << qs(w.message) << "\n";
             }
         }
     }
@@ -175,25 +192,24 @@ int runParseCheck(const QStringList& args)
     return mismatches == 0 ? 0 : 1;
 }
 
-void renderTimingRow(const ovc::osu::TimingPoint& tp)
+void renderTimingRow(const ovc::core::TimingPoint& tp)
 {
-    using ovc::utils::msToClock;
-    out() << msToClock(static_cast<qint64>(tp.timeMs)) << "  ";
+    out() << qs(ovc::core::msToClock(qint64(tp.timeMs))) << "  ";
     if (tp.uninherited)
         out() << QString::number(tp.bpm(), 'g', 6) << " BPM";
     else
-        out() << "SV " << QString::number(tp.sv(), 'g', 4) << "×";
+        out() << "SV " << QString::number(tp.sv(), 'g', 4) << "x";
     if (tp.kiai()) out() << "  kiai";
 }
 
 int runDiff(const QStringList& args)
 {
-    using namespace ovc::osu;
-    using ovc::utils::msToClock;
+    using namespace ovc::core;
     if (args.size() < 2) {
-        out() << "usage: ovc-cli diff <a.osu> <b.osu>\n";
+        out() << "usage: ovc-cli diff <a.osu> <b.osu> [--json]\n";
         return 1;
     }
+    const bool json = args.contains("--json");
     CanonicalMap maps[2];
     for (int i = 0; i < 2; ++i) {
         QFile f(args.at(i));
@@ -201,66 +217,67 @@ int runDiff(const QStringList& args)
             out() << "cannot read " << args.at(i) << "\n";
             return 1;
         }
-        const auto parsed = parseOsu(f.readAll());
-        QList<ParseWarning> warnings = parsed.warnings;
+        const QByteArray bytes = f.readAll();
+        const auto parsed = parseOsu(sv(bytes));
+        std::vector<ParseWarning> warnings = parsed.warnings;
         maps[i] = canonicalize(parsed.doc, &warnings);
-        for (const auto& w : warnings)
-            out() << args.at(i) << ": warning: " << w.message << "\n";
+        if (!json)
+            for (const auto& w : warnings)
+                out() << args.at(i) << ": warning: " << qs(w.message) << "\n";
     }
 
     const BeatmapDiff d = diffBeatmaps(maps[0], maps[1]);
-    if (d.isEmpty()) {
+    if (json) {
+        out() << qs(diffToJson(d)) << "\n";
+        out().flush();
+        return d.empty() ? 0 : 2;
+    }
+    if (d.empty()) {
         out() << "no semantic changes\n";
         out().flush();
         return 0;
     }
 
-    static const QHash<int, QByteArray> kSec = {
-        {int(SectionId::General), "[General]"},
-        {int(SectionId::Editor), "[Editor]"},
-        {int(SectionId::Metadata), "[Metadata]"},
-        {int(SectionId::Difficulty), "[Difficulty]"},
-    };
     for (const KvDiff& sec : d.kv) {
-        out() << kSec.value(int(sec.section), "[?]") << "\n";
+        out() << "[" << sectionName(sec.section) << "]\n";
         for (const FieldChange& f : sec.changes) {
-            if (f.before.isEmpty()) out() << "  + " << f.key << ": " << f.after.raw << "\n";
-            else if (f.after.isEmpty()) out() << "  − " << f.key << ": " << f.before.raw << "\n";
-            else out() << "  ~ " << f.key << ": " << f.before.raw << " → " << f.after.raw << "\n";
+            if (f.before.empty()) out() << "  + " << qs(f.key) << ": " << qs(f.after.raw) << "\n";
+            else if (f.after.empty())
+                out() << "  - " << qs(f.key) << ": " << qs(f.before.raw) << "\n";
+            else
+                out() << "  ~ " << qs(f.key) << ": " << qs(f.before.raw) << " -> "
+                      << qs(f.after.raw) << "\n";
         }
     }
 
-    if (d.modeChanged) out() << "mode changed — hitobject diff skipped\n";
+    if (d.modeChanged) out() << "mode changed - hitobject diff skipped\n";
     if (d.keyCountChanged)
-        out() << d.keyCountBefore << "K → " << d.keyCountAfter
-              << "K — every column remaps, hitobject diff skipped\n";
+        out() << d.keyCountBefore << "K -> " << d.keyCountAfter
+              << "K - every column remaps, hitobject diff skipped\n";
 
-    if (!d.events.isEmpty()) {
+    if (!d.events.empty()) {
         out() << "Events\n";
         if (d.events.background)
-            out() << "  ~ background " << d.events.background->before.raw << " → "
-                  << d.events.background->after.raw << "\n";
-        if (d.events.video)
-            out() << "  ~ video " << d.events.video->before.raw << " → "
-                  << d.events.video->after.raw << "\n";
+            out() << "  ~ background " << qs(d.events.background->before.raw) << " -> "
+                  << qs(d.events.background->after.raw) << "\n";
         for (const BreakChange& b : d.events.breaks) {
             if (b.op == ChangeOp::Added)
-                out() << "  + break " << msToClock(b.after.startMs) << "–"
-                      << msToClock(b.after.endMs) << "\n";
+                out() << "  + break " << qs(msToClock(b.after.startMs)) << "-"
+                      << qs(msToClock(b.after.endMs)) << "\n";
             else if (b.op == ChangeOp::Removed)
-                out() << "  − break " << msToClock(b.before.startMs) << "–"
-                      << msToClock(b.before.endMs) << "\n";
+                out() << "  - break " << qs(msToClock(b.before.startMs)) << "-"
+                      << qs(msToClock(b.before.endMs)) << "\n";
             else
-                out() << "  ~ break " << msToClock(b.before.startMs) << " end "
-                      << msToClock(b.before.endMs) << " → " << msToClock(b.after.endMs)
+                out() << "  ~ break " << qs(msToClock(b.before.startMs)) << " end "
+                      << qs(msToClock(b.before.endMs)) << " -> " << qs(msToClock(b.after.endMs))
                       << "\n";
         }
         if (d.events.storyboardChanged)
-            out() << "  storyboard lines +" << d.events.sbLinesAdded << " −"
+            out() << "  storyboard lines +" << d.events.sbLinesAdded << " -"
                   << d.events.sbLinesRemoved << "\n";
     }
 
-    if (!d.timing.isEmpty()) {
+    if (!d.timing.empty()) {
         out() << "Timing\n";
         for (const TimingChange& t : d.timing) {
             if (t.op == ChangeOp::Added) {
@@ -268,17 +285,15 @@ int runDiff(const QStringList& args)
                 renderTimingRow(t.after);
             }
             else if (t.op == ChangeOp::Removed) {
-                out() << "  − ";
+                out() << "  - ";
                 renderTimingRow(t.before);
             }
             else {
-                out() << "  ~ " << msToClock(t.timeQ / 1000) << " ";
+                out() << "  ~ " << qs(msToClock(t.timeQ / 1000)) << " ";
                 QStringList bits;
                 for (const FieldChange& f : t.fields)
-                    bits << QStringLiteral("%1 %2 → %3")
-                                .arg(QString::fromUtf8(f.key),
-                                     QString::fromUtf8(f.before.raw),
-                                     QString::fromUtf8(f.after.raw));
+                    bits << QStringLiteral("%1 %2 -> %3").arg(qs(f.key), qs(f.before.raw),
+                                                              qs(f.after.raw));
                 out() << bits.join(", ");
             }
             out() << "\n";
@@ -294,46 +309,49 @@ int runDiff(const QStringList& args)
         for (const NoteChange& n : d.notes) {
             if (n.moveSuppressed) continue;
             if (shown++ == 200) {
-                out() << "  … and " << (visible - 200) << " more\n";
+                out() << "  ... and " << (visible - 200) << " more\n";
                 break;
             }
             if (n.movedFromColumn >= 0) {
-                out() << "  → " << msToClock(n.timeMs) << " col " << n.movedFromColumn
-                      << "→" << n.column << " (moved)\n";
+                out() << "  > " << qs(msToClock(n.timeMs)) << " col " << n.movedFromColumn
+                      << "->" << n.column << " (moved)\n";
                 continue;
             }
-            const char* mark = n.op == ChangeOp::Added ? "+" : n.op == ChangeOp::Removed ? "−" : "~";
-            out() << "  " << mark << " " << msToClock(n.timeMs) << " col " << n.column;
+            const char* mark = n.op == ChangeOp::Added     ? "+"
+                               : n.op == ChangeOp::Removed ? "-"
+                                                           : "~";
+            out() << "  " << mark << " " << qs(msToClock(n.timeMs)) << " col " << n.column;
             const CanonicalNote& show = n.op == ChangeOp::Removed ? n.before : n.after;
-            if (show.isHold) out() << " hold →" << msToClock(show.endTimeMs);
+            if (show.isHold) out() << " hold >" << qs(msToClock(show.endTimeMs));
             for (const FieldChange& f : n.fields)
-                out() << "  " << f.key << " " << f.before.raw << " → " << f.after.raw;
+                out() << "  " << qs(f.key) << " " << qs(f.before.raw) << " -> "
+                      << qs(f.after.raw);
             out() << "\n";
         }
     }
 
-    auto renderList = [](const char* name, const ovc::osu::ListDiff& l) {
-        if (l.isEmpty()) return;
+    auto renderList = [](const char* name, const ovc::core::ListDiff& l) {
+        if (l.empty()) return;
         out() << name << " ";
         QStringList bits;
-        for (const QByteArray& v : l.added) bits << "+" + QString::fromUtf8(v);
-        for (const QByteArray& v : l.removed) bits << "−" + QString::fromUtf8(v);
+        for (const std::string& v : l.added) bits << "+" + qs(v);
+        for (const std::string& v : l.removed) bits << "-" + qs(v);
         out() << bits.join(' ') << "\n";
     };
     renderList("Bookmarks", d.bookmarks);
     renderList("Tags", d.tags);
 
-    out() << "— " << d.summary();
+    out() << "-- " << qs(d.summary());
     const auto range = d.affectedTimeRange();
     if (range.first >= 0)
-        out() << "  (" << msToClock(range.first) << " – " << msToClock(range.second) << ")";
+        out() << "  (" << qs(msToClock(range.first)) << " - " << qs(msToClock(range.second))
+              << ")";
     out() << "\n";
     out().flush();
     return 2;
 }
 
-// Save-behavior spike: raw ReadDirectoryChangesW event log with timings, to
-// see exactly what osu!'s editor does on save (rewrite? temp+rename? bursts?).
+// Save-behavior spike: raw ReadDirectoryChangesW event log with timings.
 int runFswatch(const QStringList& args)
 {
 #ifndef Q_OS_WIN
@@ -382,10 +400,9 @@ int runFswatch(const QStringList& args)
             case FILE_ACTION_RENAMED_NEW_NAME: action = "REN_NEW "; break;
             }
             const QString name = QString::fromWCharArray(
-                info->FileName, static_cast<int>(info->FileNameLength / sizeof(wchar_t)));
-            out() << QString::asprintf("%8lld ms  %s+%-5lld  %s  ", now,
-                                       lastMs < 0 ? "" : "\xce\x94", lastMs < 0 ? 0 : now - lastMs,
-                                       action)
+                info->FileName, int(info->FileNameLength / sizeof(wchar_t)));
+            out() << QString::asprintf("%8lld ms  d+%-6lld  %s  ", now,
+                                       lastMs < 0 ? 0 : now - lastMs, action)
                   << name << "\n";
             if (info->NextEntryOffset == 0) break;
             p += info->NextEntryOffset;
@@ -441,6 +458,35 @@ int runWatch(QCoreApplication& app)
     return app.exec();
 }
 
+ovc::git::MapsetEntry* resolveEntry(ovc::git::Registry& reg, const QString& arg)
+{
+    if (auto* e = reg.findByRepoId(arg)) return e;
+    return reg.findBySongsPath(arg);
+}
+
+// Looser match for untrack/list: repoId/path first, then an exact folder or title
+// (case-insensitive), then a UNIQUE case-insensitive substring of the folder or
+// "Artist - Title" (ambiguous -> null, so a vague arg can't nuke the wrong set).
+ovc::git::MapsetEntry* resolveEntryLoose(ovc::git::Registry& reg, const QString& arg)
+{
+    if (auto* e = resolveEntry(reg, arg)) return e;
+    for (auto& e : reg.entries)
+        if (e.folderName.compare(arg, Qt::CaseInsensitive) == 0
+            || e.title.compare(arg, Qt::CaseInsensitive) == 0)
+            return &e;
+    ovc::git::MapsetEntry* hit = nullptr;
+    int n = 0;
+    for (auto& e : reg.entries) {
+        const QString label = e.artist + QStringLiteral(" - ") + e.title;
+        if (e.folderName.contains(arg, Qt::CaseInsensitive)
+            || label.contains(arg, Qt::CaseInsensitive)) {
+            hit = &e;
+            ++n;
+        }
+    }
+    return n == 1 ? hit : nullptr;
+}
+
 int runRestore(const QStringList& args)
 {
     using namespace ovc::watch;
@@ -450,8 +496,7 @@ int runRestore(const QStringList& args)
     }
     const bool force = args.contains("--force");
     ovc::git::Registry reg = ovc::git::Registry::load();
-    ovc::git::MapsetEntry* entry = reg.findByRepoId(args.at(0));
-    if (!entry) entry = reg.findBySongsPath(args.at(0));
+    ovc::git::MapsetEntry* entry = resolveEntry(reg, args.at(0));
     if (!entry) {
         out() << "not tracked: " << args.at(0) << "\n";
         return 1;
@@ -465,7 +510,7 @@ int runRestore(const QStringList& args)
             ProcessHandle proc;
             if (proc.open(pids.front()) && !proc.is64bit()) {
                 StableReader reader(proc);
-                out() << "checking osu! state…\n";
+                out() << "checking osu! state...\n";
                 out().flush();
                 if (reader.resolve() && reader.status() == GameState::Edit) {
                     MemBeatmap m;
@@ -498,12 +543,6 @@ int runRestore(const QStringList& args)
     return 0;
 }
 
-ovc::git::MapsetEntry* resolveEntry(ovc::git::Registry& reg, const QString& arg)
-{
-    if (auto* e = reg.findByRepoId(arg)) return e;
-    return reg.findBySongsPath(arg);
-}
-
 int runTrack(const QStringList& args)
 {
     if (args.isEmpty()) {
@@ -518,6 +557,87 @@ int runTrack(const QStringList& args)
     }
     out() << "tracked " << entry->artist << " - " << entry->title << " (" << entry->creator
           << ")\n  repoId " << entry->repoId << "\n  repo   " << entry->repoDir() << "\n";
+    out().flush();
+    return 0;
+}
+
+int runList(const QStringList&)
+{
+    ovc::git::Registry reg = ovc::git::Registry::load();
+    if (reg.entries.isEmpty()) {
+        out() << "no tracked mapsets\n";
+        out().flush();
+        return 0;
+    }
+    for (const auto& e : reg.entries)
+        out() << e.repoId << "  " << e.artist << " - " << e.title
+              << (e.autoSnapshot ? "" : "  [auto-snapshot off]") << "\n"
+              << "    " << e.folderName << "\n";
+    out().flush();
+    return 0;
+}
+
+int runUntrack(const QStringList& args)
+{
+    QString name;
+    for (const QString& a : args)
+        if (!a.startsWith(QStringLiteral("--"))) {
+            name = a;
+            break;
+        }
+    if (name.isEmpty()) {
+        out() << "usage: ovc-cli untrack <repoId|folder|title> [--keep-data]\n"
+                 "  removes the mapset from ovc; deletes its tracked history unless --keep-data.\n"
+                 "  your osu! Songs folder is never touched.\n";
+        return 1;
+    }
+    const bool keep = args.contains(QStringLiteral("--keep-data"));
+    ovc::git::Registry reg = ovc::git::Registry::load();
+    ovc::git::MapsetEntry* e = resolveEntryLoose(reg, name);
+    if (!e) {
+        out() << "not tracked (or ambiguous): " << name << "\n";
+        return 1;
+    }
+    const QString rid = e->repoId;
+    const QString label = e->artist + QStringLiteral(" - ") + e->title;
+    const QString dir = e->repoDir();
+    reg.removeByRepoId(rid);
+    QString err;
+    if (!reg.save(&err)) {
+        out() << "untrack failed: " << err << "\n";
+        return 1;
+    }
+    if (!keep) QDir(dir).removeRecursively();
+    out() << "untracked " << label << "  (" << rid << ")\n"
+          << (keep ? "  kept history at " : "  deleted ") << dir << "\n"
+          << "  note: if the ovc app is running, quit + reopen it so it doesn't re-add this.\n";
+    out().flush();
+    return 0;
+}
+
+int runRelink(const QStringList& args)
+{
+    if (args.size() < 2) {
+        out() << "usage: ovc-cli relink <repoId|folder|title> <newFolder>\n"
+                 "  re-point a tracked set at a renamed/moved folder (e.g. after an upload\n"
+                 "  assigned it a set ID). Refreshes the stored IDs from the new .osu files.\n";
+        return 1;
+    }
+    ovc::git::Registry reg = ovc::git::Registry::load();
+    ovc::git::MapsetEntry* e = resolveEntryLoose(reg, args.at(0));
+    if (!e) {
+        out() << "not tracked (or ambiguous): " << args.at(0) << "\n";
+        return 1;
+    }
+    QString err;
+    if (!ovc::git::relinkEntry(*e, args.at(1), &err) || !reg.save(&err)) {
+        out() << "relink failed: " << err << "\n";
+        return 1;
+    }
+    out() << "relinked " << e->artist << " - " << e->title << "  (" << e->repoId << ")\n"
+          << "  now at " << e->songsPath << "\n"
+          << "  setId  " << e->beatmapSetId << "\n"
+          << "  note: if the ovc app is running, quit + reopen it so it uses the new path.\n";
     out().flush();
     return 0;
 }
@@ -576,6 +696,185 @@ int runLog(const QStringList& args)
     return 0;
 }
 
+// git merge-driver shape: `merge-file %O %A %B` — %A (ours) is overwritten
+// with the merged result; exit 0 clean, 1 on conflict (ours wins each, so the
+// file is still usable). Register with:
+//   git config merge.osu.driver "ovc-cli merge-file %O %A %B"
+int runMergeFile(const QStringList& args)
+{
+    using namespace ovc::core;
+    if (args.size() < 3) {
+        out() << "usage: ovc-cli merge-file <base> <ours> <theirs>\n";
+        return 2;
+    }
+    auto read = [](const QString& path, bool* ok) {
+        QFile f(path);
+        *ok = f.open(QIODevice::ReadOnly);
+        return *ok ? f.readAll() : QByteArray();
+    };
+    bool okB = false, okO = false, okT = false;
+    const QByteArray baseBytes = read(args.at(0), &okB);
+    const QByteArray oursBytes = read(args.at(1), &okO);
+    const QByteArray theirsBytes = read(args.at(2), &okT);
+    if (!okO || !okT) {
+        out() << "merge-file: cannot read ours/theirs\n";
+        return 2;
+    }
+    const CanonicalMap base = canonicalize(parseOsu(sv(baseBytes)).doc);
+    const CanonicalMap ours = canonicalize(parseOsu(sv(oursBytes)).doc);
+    const CanonicalMap theirs = canonicalize(parseOsu(sv(theirsBytes)).doc);
+
+    const MergeResult r = merge3(base, ours, theirs);
+    if (r.wholeFileConflict) {
+        out() << "merge-file: cannot auto-merge — " << qs(r.reason)
+              << "\n(left ours untouched; resolve by hand)\n";
+        return 1; // leave ours as-is for a manual resolution
+    }
+
+    const std::string merged = emitCanonical(r.merged);
+    QFile ours_out(args.at(1));
+    if (!ours_out.open(QIODevice::WriteOnly)) {
+        out() << "merge-file: cannot write " << args.at(1) << "\n";
+        return 2;
+    }
+    ours_out.write(merged.data(), qint64(merged.size()));
+
+    if (r.conflicts.empty()) {
+        out() << "merged cleanly (" << r.merged.notes.size() << " notes)\n";
+        return 0;
+    }
+    out() << r.conflicts.size() << " conflict(s) — kept ours for each:\n";
+    for (const Conflict& c : r.conflicts)
+        out() << "  " << qs(c.key) << ": ours=" << qs(c.ours) << " theirs=" << qs(c.theirs)
+              << "\n";
+    out().flush();
+    return 1;
+}
+
+int runExport(const QStringList& args)
+{
+    if (args.size() < 2) {
+        out() << "usage: ovc-cli export <repoId|folder> <out.ovcz> [--text-only]\n";
+        return 1;
+    }
+    ovc::git::Registry reg = ovc::git::Registry::load();
+    const auto* entry = resolveEntry(reg, args.at(0));
+    if (!entry) {
+        out() << "not tracked: " << args.at(0) << "\n";
+        return 1;
+    }
+    QString err;
+    if (!ovc::git::exportBundle(*entry, args.at(1), args.contains("--text-only"), &err)) {
+        out() << "export failed: " << err << "\n";
+        return 1;
+    }
+    out() << "exported " << args.at(1) << " (" << QFileInfo(args.at(1)).size() / 1024
+          << " KiB)\n";
+    out().flush();
+    return 0;
+}
+
+int runImport(const QStringList& args)
+{
+    if (args.isEmpty()) {
+        out() << "usage: ovc-cli import <bundle.ovcz> [--into <songs folder>]\n";
+        return 1;
+    }
+    QString into;
+    const int intoIdx = int(args.indexOf("--into"));
+    if (intoIdx >= 0 && intoIdx + 1 < args.size()) into = args.at(intoIdx + 1);
+    QString err;
+    const auto entry = ovc::git::importBundle(args.first(), into, &err);
+    if (!entry) {
+        out() << "import failed: " << err << "\n";
+        return 1;
+    }
+    out() << "imported " << entry->artist << " - " << entry->title << "\n  repoId "
+          << entry->repoId
+          << (entry->songsPath.isEmpty() ? "\n  (view-only: no local folder linked)\n"
+                                         : "\n  linked to " + entry->songsPath + "\n");
+    out().flush();
+    return 0;
+}
+
+int runMergeBundle(const QStringList& args)
+{
+    if (args.size() < 2) {
+        out() << "usage: ovc-cli merge-bundle <repoId|folder> <bundle.ovcz>\n";
+        return 1;
+    }
+    ovc::git::Registry reg = ovc::git::Registry::load();
+    const auto* entry = resolveEntry(reg, args.at(0));
+    if (!entry) {
+        out() << "not tracked: " << args.at(0) << "\n";
+        return 1;
+    }
+    QString err;
+    const auto outcome = ovc::git::collabMergeBundle(*entry, args.at(1), &err);
+    if (!outcome) {
+        out() << "merge failed: " << (err.isEmpty() ? QStringLiteral("unknown error") : err)
+              << "\n";
+        return 1;
+    }
+    const auto& rep = outcome->report;
+    if (!rep.anyChange()) {
+        out() << "nothing to merge (bundle has no changes you're missing)\n";
+        return 0;
+    }
+    for (const auto& f : rep.files) {
+        if (f.wholeFileConflict)
+            out() << "  [" << f.version << "] skipped — " << f.reason << "\n";
+        else if (f.conflictCount() > 0) {
+            out() << "  [" << f.version << "] " << f.conflictCount()
+                  << " conflict(s), kept ours:\n";
+            for (const QString& k : f.conflictKeys) out() << "      " << k << "\n";
+        }
+        else if (f.changed)
+            out() << "  [" << f.version << "] merged cleanly\n";
+    }
+    out() << (rep.totalConflicts() == 0 ? "merged cleanly" : "merged with conflicts")
+          << " — press F5 in song select before reopening.\n";
+    out().flush();
+    return rep.totalConflicts() == 0 ? 0 : 1;
+}
+
+int runServe(QCoreApplication& app)
+{
+    using namespace ovc::watch;
+    const ovc::utils::Config cfg = ovc::utils::Config::load();
+    out() << "serve: tracking + local API on http://127.0.0.1:" << cfg.serverPort
+          << " (Ctrl+C to quit)\n"
+          << "token: " << cfg.serverToken << "\n";
+    out().flush();
+
+    GameWatcher watcher;
+    TrackingService svc;
+    QObject::connect(&watcher, &GameWatcher::beatmapChanged, &svc,
+                     &TrackingService::onBeatmapChanged);
+    QObject::connect(&watcher, &GameWatcher::beatmapCleared, &svc,
+                     &TrackingService::onBeatmapCleared);
+    QObject::connect(&watcher, &GameWatcher::stateChanged, &svc,
+                     &TrackingService::onStateChanged);
+    svc.setEditorTimeProvider([&watcher]() { return watcher.editorTimeMs(); });
+
+    ovc::git::MergeSessionStore merges;
+    ovc::serve::LocalServer server(svc, merges, cfg);
+    // Headless mode auto-approves restores (the CLI user asked for the server).
+    server.setRestoreConfirmer(
+        [](QString, QString) { return QtFuture::makeReadyValueFuture(true); });
+    QString err;
+    if (!server.start(&err)) {
+        out() << "server failed: " << err << "\n";
+        return 1;
+    }
+    QObject::connect(&svc, &TrackingService::snapshotTaken,
+                     [](const QString&, const QString& subject, const QByteArray& oid) {
+                         out() << "[snap] " << oid.left(7) << "  " << subject << "\n";
+                         out().flush();
+                     });
+    return app.exec();
+}
+
 int runGitCheck()
 {
     using namespace ovc::git;
@@ -603,12 +902,20 @@ int main(int argc, char* argv[])
     if (cmd == "parse" && args.size() > 2 && args.at(2) == "--check")
         return runParseCheck(args.mid(3));
     if (cmd == "diff") return runDiff(args.mid(2));
+    if (cmd == "merge-file") return runMergeFile(args.mid(2));
     if (cmd == "track") return runTrack(args.mid(2));
+    if (cmd == "list") return runList(args.mid(2));
+    if (cmd == "untrack") return runUntrack(args.mid(2));
+    if (cmd == "relink") return runRelink(args.mid(2));
     if (cmd == "snapshot") return runSnapshot(args.mid(2));
     if (cmd == "log") return runLog(args.mid(2));
     if (cmd == "fswatch") return runFswatch(args.mid(2));
     if (cmd == "watch") return runWatch(app);
+    if (cmd == "serve") return runServe(app);
     if (cmd == "restore") return runRestore(args.mid(2));
+    if (cmd == "export") return runExport(args.mid(2));
+    if (cmd == "import") return runImport(args.mid(2));
+    if (cmd == "merge-bundle") return runMergeBundle(args.mid(2));
 
     out() << "usage: ovc-cli <command>\n"
              "  probe                     stream osu! memory-reader state\n"
@@ -616,10 +923,18 @@ int main(int argc, char* argv[])
              "  gitcheck                  print libgit2 version and run a scratch-repo self test\n"
              "  parse --check <path> [-v] verify lossless round-trip of .osu file(s) or dir\n"
              "  diff <a.osu> <b.osu>      semantic diff of two difficulties\n"
+             "  merge-file <base> <ours> <theirs>  3-way merge (writes ours; git driver)\n"
              "  track <folder>            start tracking a mapset folder (shadow repo + import)\n"
+             "  list                      list tracked mapsets (repoId + name)\n"
+             "  untrack <id|folder|title> [--keep-data]  stop tracking; deletes history unless --keep-data\n"
+             "  relink <id|folder|title> <newFolder>     re-point a tracked set at a renamed/uploaded folder\n"
              "  snapshot <id|folder>      mirror + commit current state if changed\n"
              "  log <id|folder>           list snapshots of a tracked mapset\n"
              "  restore <id|folder> <oid> write an old snapshot back into the Songs folder\n"
+             "  serve                     watch + local API for the web viewer\n"
+             "  export <id|folder> <out.ovcz> [--text-only]  shareable history bundle\n"
+             "  import <bundle.ovcz> [--into <folder>]       load a bundle into the registry\n"
+             "  merge-bundle <id|folder> <bundle.ovcz>       merge a collaborator's bundle in\n"
              "  fswatch <folder>          log raw filesystem events (save-behavior spike)\n";
     out().flush();
     return cmd.isEmpty() ? 0 : 1;

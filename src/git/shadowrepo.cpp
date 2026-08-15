@@ -2,6 +2,8 @@
 #include "gitraii.h"
 #include <QDir>
 #include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 
 namespace ovc::git {
 
@@ -133,7 +135,8 @@ std::optional<QByteArray> ShadowRepo::stageAll(QString* err)
 }
 
 QByteArray ShadowRepo::commitStaged(const QByteArray& treeOid, const QString& subject,
-                                    const QMap<QString, QString>& trailers, QString* err)
+                                    const QMap<QString, QString>& trailers, QString* err,
+                                    const QDateTime& when)
 {
     git_oid tree;
     if (!oidFromHex(treeOid, &tree)) {
@@ -154,7 +157,11 @@ QByteArray ShadowRepo::commitStaged(const QByteArray& treeOid, const QString& su
     }
 
     SigPtr sig;
-    if (git_signature_now(sig.out(), "ovc", "ovc@local") != 0) {
+    const int sigRc = when.isValid()
+                          ? git_signature_new(sig.out(), "ovc", "ovc@local",
+                                              when.toSecsSinceEpoch(), 0)
+                          : git_signature_now(sig.out(), "ovc", "ovc@local");
+    if (sigRc != 0) {
         setErr(err);
         return {};
     }
@@ -214,6 +221,7 @@ QList<ShadowRepo::CommitInfo> ShadowRepo::log(int limit) const
     git_revwalk_sorting(walk, GIT_SORT_TOPOLOGICAL | GIT_SORT_TIME);
     if (git_revwalk_push_head(walk) != 0) return out; // unborn: empty history
 
+    const QMap<QByteArray, QString> labelMap = labels();
     git_oid oid;
     while (out.size() < limit && git_revwalk_next(&oid, walk) == 0) {
         CommitPtr commit;
@@ -225,6 +233,7 @@ QList<ShadowRepo::CommitInfo> ShadowRepo::log(int limit) const
         info.when = QDateTime::fromSecsSinceEpoch(git_commit_time(commit));
         const QString message = QString::fromUtf8(git_commit_message(commit));
         info.subject = message.section('\n', 0, 0);
+        info.label = labelMap.value(info.oid);
         info.trailers = parseTrailers(message);
         out.append(info);
     }
@@ -244,8 +253,48 @@ std::optional<ShadowRepo::CommitInfo> ShadowRepo::commitInfo(const QByteArray& c
     info.when = QDateTime::fromSecsSinceEpoch(git_commit_time(commit));
     const QString message = QString::fromUtf8(git_commit_message(commit));
     info.subject = message.section('\n', 0, 0);
+    info.label = labelFor(commitOid);
     info.trailers = parseTrailers(message);
     return info;
+}
+
+QMap<QByteArray, QString> ShadowRepo::labels() const
+{
+    QMap<QByteArray, QString> out;
+    QFile f(m_dir + QStringLiteral("/.git/ovc/labels.json"));
+    if (!f.open(QIODevice::ReadOnly)) return out;
+    const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+    for (auto it = o.constBegin(); it != o.constEnd(); ++it)
+        out.insert(it.key().toUtf8(), it.value().toString());
+    return out;
+}
+
+QString ShadowRepo::labelFor(const QByteArray& commitOid) const
+{
+    return labels().value(commitOid);
+}
+
+bool ShadowRepo::setLabel(const QByteArray& commitOid, const QString& name, QString* err)
+{
+    QMap<QByteArray, QString> map = labels();
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty())
+        map.remove(commitOid);
+    else
+        map.insert(commitOid, trimmed);
+
+    QJsonObject o;
+    for (auto it = map.constBegin(); it != map.constEnd(); ++it)
+        o.insert(QString::fromUtf8(it.key()), it.value());
+
+    QDir().mkpath(m_dir + QStringLiteral("/.git/ovc"));
+    QFile f(m_dir + QStringLiteral("/.git/ovc/labels.json"));
+    if (!f.open(QIODevice::WriteOnly)) {
+        if (err) *err = QStringLiteral("cannot write labels.json");
+        return false;
+    }
+    f.write(QJsonDocument(o).toJson(QJsonDocument::Compact));
+    return true;
 }
 
 QList<QPair<QString, QByteArray>> ShadowRepo::listTree(const QByteArray& oid) const
@@ -291,6 +340,13 @@ qint64 ShadowRepo::blobSize(const QByteArray& blobOid) const
     Ptr<git_blob, git_blob_free> blob;
     if (git_blob_lookup(blob.out(), m_repo, &oid) != 0) return 0;
     return static_cast<qint64>(git_blob_rawsize(blob));
+}
+
+QByteArray ShadowRepo::hashBlob(const QByteArray& bytes)
+{
+    git_oid oid;
+    if (git_odb_hash(&oid, bytes.constData(), size_t(bytes.size()), GIT_OBJECT_BLOB) != 0) return {};
+    return oidToHex(&oid);
 }
 
 bool ShadowRepo::checkoutTree(const QByteArray& commitOid, QString* err)

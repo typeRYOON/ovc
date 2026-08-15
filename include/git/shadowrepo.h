@@ -21,6 +21,7 @@ public:
         QByteArray oid, parentOid; // hex; parent empty on the root commit
         QDateTime when;
         QString subject;
+        QString label; // user-given name, if any (mutable; see setLabel)
         QMap<QString, QString> trailers;
     };
 
@@ -38,8 +39,10 @@ public:
     // equals HEAD's tree (no-op save — nothing to commit).
     std::optional<QByteArray> stageAll(QString* err = nullptr);
     // Commit a tree from stageAll. Trailers append as "Key: value" lines.
+    // `when` overrides the commit timestamp (bundle import replays history).
     QByteArray commitStaged(const QByteArray& treeOid, const QString& subject,
-                            const QMap<QString, QString>& trailers, QString* err = nullptr);
+                            const QMap<QString, QString>& trailers, QString* err = nullptr,
+                            const QDateTime& when = {});
     std::optional<QByteArray> commitAll(const QString& subject,
                                         const QMap<QString, QString>& trailers,
                                         QString* err = nullptr);
@@ -49,10 +52,21 @@ public:
     QList<CommitInfo> log(int limit = 1000) const; // first-parent, newest first
     std::optional<CommitInfo> commitInfo(const QByteArray& commitOid) const;
 
+    // Human names for snapshots. Commits are immutable (the oid is their hash),
+    // so labels live beside the repo in .git/ovc/labels.json — settable and
+    // clearable anytime without rewriting history or changing any oid. An empty
+    // name removes the label.
+    QMap<QByteArray, QString> labels() const;
+    QString labelFor(const QByteArray& commitOid) const;
+    bool setLabel(const QByteArray& commitOid, const QString& name, QString* err = nullptr);
+
     // Accepts a commit or tree oid. relPath -> blob hex oid.
     QList<QPair<QString, QByteArray>> listTree(const QByteArray& oid) const;
     QByteArray readBlob(const QByteArray& blobOid) const;
     qint64 blobSize(const QByteArray& blobOid) const;
+    // Content-addressed hex oid for arbitrary bytes (no write to the odb), so a
+    // live working file can be compared to tree blob oids without staging it.
+    static QByteArray hashBlob(const QByteArray& bytes);
 
     // Force the working tree (and index) to a commit's tree. HEAD stays put —
     // committing afterwards records the restored state as a NEW commit.

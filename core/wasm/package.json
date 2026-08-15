@@ -1,0 +1,28 @@
+{
+    "name": "@ovc/core",
+    "version": "0.2.0",
+    "description": "osu! beatmap parse/canonicalize/semantic-diff engine (WASM). Shared with the ovc desktop app.",
+    "type": "module",
+    "main": "index.mjs",
+    "types": "ovc-core.d.ts",
+    "exports": {
+        ".": {
+            "types": "./ovc-core.d.ts",
+            "import": "./index.mjs"
+        },
+        "./ticks": "./ticks.ts"
+    },
+    "files": [
+        "index.mjs",
+        "ovc-core.d.ts",
+        "ticks.ts",
+        "dist/ovc-core.mjs",
+        "dist/ovc-core.wasm"
+    ],
+    "scripts": {
+        "build": "build.bat",
+        "test": "node run-vectors.mjs"
+    },
+    "sideEffects": false,
+    "license": "SEE ovc repository"
+}

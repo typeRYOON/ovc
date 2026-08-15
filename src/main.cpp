@@ -1,11 +1,16 @@
 #include <git/gitcheck.h>
+#include <git/mergesessions.h>
+#include <serve/localserver.h>
 #include <ui/mainwindow.h>
+#include <utils/config.h>
 #include <watch/gamewatcher.h>
 #include <watch/trackingservice.h>
 #include <QApplication>
 #include <QFile>
 #include <QFontDatabase>
+#include <QLockFile>
 #include <QProxyStyle>
+#include <QStandardPaths>
 
 namespace {
 
@@ -28,9 +33,17 @@ int main(int argc, char* argv[])
     QGuiApplication::setHighDpiScaleFactorRoundingPolicy(
         Qt::HighDpiScaleFactorRoundingPolicy::Floor);
     QApplication app(argc, argv);
-    QCoreApplication::setApplicationName("ovc");
-    QApplication::setWindowIcon(QIcon(":/icons/taskbar.png"));
+    QCoreApplication::setApplicationName("ovc"); // identity for %LOCALAPPDATA%/ovc — do not change
+    QGuiApplication::setApplicationDisplayName("osu! Version Control");
+    QApplication::setWindowIcon(QIcon(":/icons/std.svg"));
     QApplication::setQuitOnLastWindowClosed(false); // lives in the tray
+
+    // One instance only: a second launch would fight the first for the API
+    // port and spawn a duplicate tray icon. Bail if we're already running.
+    QLockFile lock(QStandardPaths::writableLocation(QStandardPaths::TempLocation) +
+                   QStringLiteral("/ovc.lock"));
+    lock.setStaleLockTime(0);
+    if (!lock.tryLock()) return 0;
 
     app.setStyle(new NoFocusRectStyle(app.style()));
     QFontDatabase::addApplicationFont(":/fonts/Hiragino Maru Gothic ProN W4.otf");
@@ -38,6 +51,7 @@ int main(int argc, char* argv[])
     if (qss.open(QIODevice::ReadOnly)) app.setStyleSheet(QString::fromUtf8(qss.readAll()));
 
     ovc::git::LibGit libgit;
+    const ovc::utils::Config cfg = ovc::utils::Config::load();
 
     ovc::watch::GameWatcher watcher;
     ovc::watch::TrackingService service;
@@ -49,6 +63,13 @@ int main(int argc, char* argv[])
                      &ovc::watch::TrackingService::onStateChanged);
     service.setEditorTimeProvider([&watcher]() { return watcher.editorTimeMs(); });
 
-    ovc::ui::MainWindow window(service, watcher);
+    ovc::git::MergeSessionStore merges;
+    ovc::serve::LocalServer server(service, merges, cfg);
+    if (cfg.serveEnabled) server.startAutoRetry(); // recovers once the port frees
+
+    ovc::ui::MainWindow window(service, watcher, &server, merges, cfg);
+    server.setRestoreConfirmer([&window](QString title, QString subject) {
+        return window.confirmRestore(title, subject);
+    });
     return QApplication::exec();
 }

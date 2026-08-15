@@ -1,7 +1,9 @@
 out/
+dist/
 vcpkg_installed/
 CMakeUserPresets.json
 .vs/
 .cache/
 *.user
 refs/
+Testing/

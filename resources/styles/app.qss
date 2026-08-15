@@ -1,5 +1,5 @@
 /* ── ovc app-wide ─────────────────────────────────────────────────────────────
-   Palette tokens (tagcomposer's cheat sheet):
+   Palette tokens:
        Surfaces:   #0a0a0a chrome   #0d0d0d page   #0f0f0f panel   #111111 raised
                    #141414 input    #181818 focus  #1a1a1a hover
        Borders:    #1a1a1a faint    #222222 default  #2a2a2a emphatic  #333 focus
@@ -87,6 +87,10 @@ QSplitter::handle {
     width: 1px;
 }
 
+QSplitter::handle:vertical {
+    height: 1px;
+}
+
 /* ── Lists ───────────────────────────────────────────────────────────────── */
 
 QListView {
@@ -142,6 +146,26 @@ QPushButton#TrackButton {
 QPushButton#TrackButton:hover {
     background: #1a2a1a;
     border-color: #4a8a4a;
+}
+
+QLineEdit {
+    background: #141414;
+    color: #e0e0e0;
+    border: 1px solid #222222;
+    border-radius: 4px;
+    padding: 5px 8px;
+    selection-background-color: #2a2a2a;
+    selection-color: #ffffff;
+}
+
+QLineEdit:focus {
+    border-color: #3a3a3a;
+    background: #181818;
+}
+
+QLineEdit:disabled {
+    color: #444444;
+    border-color: #1a1a1a;
 }
 
 QCheckBox {
@@ -244,6 +268,100 @@ QLabel#EmptyHint {
     color: #555555;
     background: transparent;
     font-size: 14px;
+}
+
+/* ── Right-pane tabs + timeline ──────────────────────────────────────────── */
+
+QTabWidget#DiffTabs::pane {
+    border: none;
+    background: #0d0d0d;
+}
+
+QTabBar::tab {
+    background: transparent;
+    color: #666666;
+    padding: 8px 16px;
+    border: none;
+    font-size: 13px;
+}
+
+QTabBar::tab:hover {
+    color: #aaaaaa;
+}
+
+QTabBar::tab:selected {
+    color: #e0e0e0;
+    border-bottom: 2px solid #4a8a4a;
+}
+
+#TimelineToolbar {
+    background: #0f0f0f;
+    border-bottom: 1px solid #1a1a1a;
+}
+
+QLabel#TimelineStatus {
+    color: #666666;
+    background: transparent;
+    font-size: 12px;
+}
+
+QPushButton#PlayButton {
+    font-size: 15px;
+    padding: 4px 0;
+}
+
+QSlider#VolumeSlider::groove:horizontal {
+    height: 4px;
+    background: #222222;
+    border-radius: 2px;
+}
+
+QSlider#VolumeSlider::sub-page:horizontal {
+    background: #4a8a4a;
+    border-radius: 2px;
+}
+
+QSlider#VolumeSlider::handle:horizontal {
+    width: 12px;
+    height: 12px;
+    margin: -4px 0;
+    border-radius: 6px;
+    background: #cccccc;
+}
+
+QSlider#VolumeSlider::handle:horizontal:hover {
+    background: #ffffff;
+}
+
+#SeekRail {
+    background: #0d0d0d;
+    border-top: 1px solid #1a1a1a;
+}
+
+QComboBox {
+    background: #141414;
+    color: #cccccc;
+    border: 1px solid #222222;
+    border-radius: 4px;
+    padding: 5px 10px;
+}
+
+QComboBox:hover {
+    border-color: #3a3a3a;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 18px;
+}
+
+QComboBox QAbstractItemView {
+    background: #141414;
+    color: #e0e0e0;
+    border: 1px solid #222222;
+    selection-background-color: #2a2a2a;
+    selection-color: #ffffff;
+    outline: 0;
 }
 
 /* ── Scrollbars ──────────────────────────────────────────────────────────── */

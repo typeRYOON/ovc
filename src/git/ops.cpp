@@ -1,7 +1,8 @@
+#include <git/bundle.h>
 #include <git/mirror.h>
 #include <git/ops.h>
 #include <git/paths.h>
-#include <osu/peek.h>
+#include <ovccore/peek.h>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -54,16 +55,17 @@ std::optional<MapsetEntry> trackMapset(const QString& songsDir, QString* err)
     for (const QString& name : osuFiles) {
         QFile f(dir.filePath(name));
         if (!f.open(QIODevice::ReadOnly)) continue;
-        const auto h = osu::peekOsuHeader(f.read(8192));
+        const QByteArray head = f.read(8192);
+        const auto h = core::peekOsuHeader({head.constData(), size_t(head.size())});
         if (!h) continue;
         if (h->beatmapId > 0 && !entry.beatmapIds.contains(h->beatmapId))
             entry.beatmapIds.append(h->beatmapId);
         if (entry.beatmapSetId <= 0 && h->beatmapSetId > 0)
             entry.beatmapSetId = h->beatmapSetId;
         if (entry.title.isEmpty()) {
-            entry.title = h->title;
-            entry.artist = h->artist;
-            entry.creator = h->creator;
+            entry.title = QString::fromStdString(h->title);
+            entry.artist = QString::fromStdString(h->artist);
+            entry.creator = QString::fromStdString(h->creator);
         }
     }
     if (osuFiles.isEmpty()) {
@@ -114,6 +116,62 @@ std::optional<MapsetEntry> trackMapset(const QString& songsDir, QString* err)
     return entry;
 }
 
+bool refreshMapsetMetadata(MapsetEntry& entry)
+{
+    const QDir dir(entry.songsPath);
+    if (!dir.exists()) return false; // folder gone: keep whatever we had
+
+    QString title, artist, creator;
+    const QStringList osuFiles = dir.entryList({QStringLiteral("*.osu")}, QDir::Files);
+    for (const QString& name : osuFiles) {
+        if (!title.isEmpty() && !artist.isEmpty() && !creator.isEmpty()) break;
+        QFile f(dir.filePath(name));
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        const QByteArray head = f.read(8192);
+        const auto h = core::peekOsuHeader({head.constData(), size_t(head.size())});
+        if (!h) continue;
+        if (title.isEmpty() && !h->title.empty()) title = QString::fromStdString(h->title);
+        if (artist.isEmpty() && !h->artist.empty()) artist = QString::fromStdString(h->artist);
+        if (creator.isEmpty() && !h->creator.empty()) creator = QString::fromStdString(h->creator);
+    }
+
+    bool changed = false;
+    if (!title.isEmpty() && entry.title != title) { entry.title = title; changed = true; }
+    if (!artist.isEmpty() && entry.artist != artist) { entry.artist = artist; changed = true; }
+    if (!creator.isEmpty() && entry.creator != creator) { entry.creator = creator; changed = true; }
+    return changed;
+}
+
+bool relinkEntry(MapsetEntry& entry, const QString& newSongsDir, QString* err)
+{
+    const QString clean = QDir::cleanPath(newSongsDir);
+    const QDir dir(clean);
+    if (!dir.exists()) {
+        if (err) *err = QStringLiteral("folder does not exist: ") + clean;
+        return false;
+    }
+    const QStringList osuFiles = dir.entryList({QStringLiteral("*.osu")}, QDir::Files);
+    if (osuFiles.isEmpty()) {
+        if (err) *err = QStringLiteral("no .osu files in ") + clean;
+        return false;
+    }
+    entry.songsPath = clean;
+    entry.folderName = dir.dirName();
+    // Refresh identity from the (now-submitted) difficulties. beatmapIds
+    // accumulate; setId is overwritten since a submitted set carries the real one.
+    for (const QString& name : osuFiles) {
+        QFile f(dir.filePath(name));
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        const QByteArray head = f.read(8192);
+        const auto h = core::peekOsuHeader({head.constData(), size_t(head.size())});
+        if (!h) continue;
+        if (h->beatmapId > 0 && !entry.beatmapIds.contains(h->beatmapId))
+            entry.beatmapIds.append(h->beatmapId);
+        if (h->beatmapSetId > 0) entry.beatmapSetId = h->beatmapSetId;
+    }
+    return true;
+}
+
 std::optional<SnapshotResult> snapshotMapset(const MapsetEntry& entry, const QString& trigger,
                                              const QMap<QString, QString>& extraTrailers,
                                              QString* err, const QString& subjectOverride)
@@ -145,7 +203,7 @@ std::optional<SnapshotResult> snapshotMapset(const MapsetEntry& entry, const QSt
     for (const FileChange& c : res.diff.files) {
         if (c.kind != FileKind::Difficulty || !c.semantic) continue;
         ++diffCount;
-        difficulty = c.semantic->version;
+        difficulty = QString::fromStdString(c.semantic->version);
         const auto range = c.semantic->affectedTimeRange();
         if (range.first >= 0) {
             lo = std::min(lo, range.first);
@@ -169,6 +227,11 @@ std::optional<SnapshotResult> restoreMapset(const MapsetEntry& entry, const QByt
                                             QString* err)
 {
     if (err) err->clear();
+    if (entry.songsPath.isEmpty()) {
+        // View-only archives (bundle imports without --into) have no target.
+        if (err) *err = QStringLiteral("no local folder linked to this mapset");
+        return std::nullopt;
+    }
     auto repo = ShadowRepo::open(entry.repoDir());
     if (!repo) {
         if (err) *err = QStringLiteral("repo missing: ") + entry.repoDir();
@@ -185,8 +248,17 @@ std::optional<SnapshotResult> restoreMapset(const MapsetEntry& entry, const QByt
     };
 
     // Safety net: whatever is in Songs right now gets its own commit first.
-    snapshotMapset(entry, QStringLiteral("pre-restore"), {}, err);
-    if (err && !err->isEmpty()) return std::nullopt;
+    // A missing/empty folder (bundle import restoring into a fresh target)
+    // has nothing worth saving — snapshotting it would commit an empty tree.
+    QDir().mkpath(entry.songsPath);
+    const bool songsHasContent =
+        !QDir(entry.songsPath)
+             .entryList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot)
+             .isEmpty();
+    if (songsHasContent) {
+        snapshotMapset(entry, QStringLiteral("pre-restore"), {}, err);
+        if (err && !err->isEmpty()) return std::nullopt;
+    }
 
     QSet<QString> targetPaths;
     for (const auto& [relPath, blobOid] : repo->listTree(commitOid)) {
@@ -224,6 +296,52 @@ std::optional<SnapshotResult> restoreMapset(const MapsetEntry& entry, const QByt
                           {{QStringLiteral("Ovc-Restored-From"),
                             QString::fromUtf8(commitOid.left(7))}},
                           err, subject);
+}
+
+std::optional<CollabMergeOutcome> applyBundleMerge(const MapsetEntry& entry,
+                                                   const PreparedMerge& prepared,
+                                                   const FileResolutions& resolutions,
+                                                   QString* err)
+{
+    if (err) err->clear();
+    if (entry.songsPath.isEmpty()) {
+        if (err) *err = QStringLiteral("no local folder linked to this mapset");
+        return std::nullopt;
+    }
+
+    // Safety net: capture whatever is in Songs now so the merge is reversible.
+    snapshotMapset(entry, QStringLiteral("pre-merge"), {}, err);
+    if (err && !err->isEmpty()) return std::nullopt;
+
+    const BundleMergeReport report = applyPreparedMerge(entry, prepared, resolutions, err);
+    if (err && !err->isEmpty()) return std::nullopt;
+
+    CollabMergeOutcome out;
+    out.report = report;
+    if (!report.anyChange()) return out; // nothing new to write
+
+    const int conflicts = report.totalConflicts();
+    QStringList bits;
+    if (conflicts == 0) bits << QStringLiteral("clean");
+    else if (!resolutions.isEmpty()) bits << QStringLiteral("resolved %1").arg(conflicts);
+    else bits << QStringLiteral("%1 conflict%2, kept ours").arg(conflicts).arg(conflicts == 1 ? "" : "s");
+    if (const int mw = report.mediaWritten()) bits << QStringLiteral("+%1 media").arg(mw);
+    if (const int mk = report.mediaKeptOurs()) bits << QStringLiteral("%1 media kept").arg(mk);
+    const QString subject =
+        QStringLiteral("[merge] %1 (%2)").arg(report.bundleTitle, bits.join(QStringLiteral(", ")));
+    const auto res = snapshotMapset(entry, QStringLiteral("merge"),
+                                    {{QStringLiteral("Ovc-Merge-From"), report.bundleTitle}}, err,
+                                    subject);
+    if (res) out.snapshotOid = res->commitOid;
+    return out;
+}
+
+std::optional<CollabMergeOutcome> collabMergeBundle(const MapsetEntry& entry,
+                                                    const QString& bundlePath, QString* err)
+{
+    const auto prepared = prepareBundleMerge(entry, bundlePath, err);
+    if (!prepared) return std::nullopt;
+    return applyBundleMerge(entry, *prepared, {}, err); // ours wins any conflict
 }
 
 } // namespace ovc::git

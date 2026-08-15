@@ -1,29 +1,28 @@
 #include <git/setdiff.h>
-#include <osu/canonical.h>
-#include <osu/parser.h>
-#include <osu/peek.h>
+#include <ovccore/canonical.h>
+#include <ovccore/parser.h>
+#include <ovccore/peek.h>
 #include <QHash>
 
 namespace ovc::git {
 
 namespace {
 
-using osu::BeatmapDiff;
-
-osu::CanonicalMap canonFromBlob(const ShadowRepo& repo, const QByteArray& blobOid)
+std::string_view view(const QByteArray& b)
 {
-    return osu::canonicalize(osu::parseOsu(repo.readBlob(blobOid)).doc);
+    return {b.constData(), size_t(b.size())};
 }
 
-QString versionOfBlob(const ShadowRepo& repo, const QByteArray& blobOid)
+core::CanonicalMap canonFromBlob(const ShadowRepo& repo, const QByteArray& blobOid)
 {
-    const auto h = osu::peekOsuHeader(repo.readBlob(blobOid).left(8192));
-    return h ? h->version : QString();
+    const QByteArray bytes = repo.readBlob(blobOid);
+    return core::canonicalize(core::parseOsu(view(bytes)).doc);
 }
 
 int beatmapIdOfBlob(const ShadowRepo& repo, const QByteArray& blobOid)
 {
-    const auto h = osu::peekOsuHeader(repo.readBlob(blobOid).left(8192));
+    const QByteArray head = repo.readBlob(blobOid).left(8192);
+    const auto h = core::peekOsuHeader(view(head));
     return h ? h->beatmapId : -1;
 }
 
@@ -125,8 +124,8 @@ SetDiff diffTrees(const ShadowRepo& repo, const QByteArray& oidA, const QByteArr
     for (FileChange& c : diff.files) {
         if (c.kind != FileKind::Difficulty) continue;
         if ((c.op == FileOp::Modified || c.op == FileOp::Renamed) && c.oldOid != c.newOid)
-            c.semantic = osu::diffBeatmaps(canonFromBlob(repo, c.oldOid),
-                                           canonFromBlob(repo, c.newOid));
+            c.semantic = core::diffBeatmaps(canonFromBlob(repo, c.oldOid),
+                                            canonFromBlob(repo, c.newOid));
     }
 
     std::stable_sort(diff.files.begin(), diff.files.end(),
@@ -139,23 +138,32 @@ SetDiff diffTrees(const ShadowRepo& repo, const QByteArray& oidA, const QByteArr
 QString SetDiff::subjectLine() const
 {
     QStringList parts;
+    QStringList mediaNames; // basenames of the first few changed media files
     int mediaAdded = 0, mediaRemoved = 0, mediaModified = 0;
     for (const FileChange& c : files) {
         if (c.kind == FileKind::Difficulty) {
             const QString name = c.relPath.section('[', -1).section(']', 0, 0);
             switch (c.op) {
             case FileOp::Added: parts << QStringLiteral("+[%1]").arg(name); break;
-            case FileOp::Removed: parts << QStringLiteral("−[%1]").arg(name); break;
+            case FileOp::Removed: parts << QStringLiteral("-[%1]").arg(name); break;
             case FileOp::Renamed:
             case FileOp::Modified:
-                if (c.semantic && !c.semantic->isEmpty())
-                    parts << QStringLiteral("%1: %2").arg(name, c.semantic->summary());
+                if (c.semantic && !c.semantic->empty())
+                    parts << QStringLiteral("%1: %2").arg(
+                        name, QString::fromStdString(c.semantic->summary()));
                 else if (c.op == FileOp::Renamed)
                     parts << QStringLiteral("renamed [%1]").arg(name);
+                else
+                    parts << QStringLiteral("[%1] resaved").arg(name); // blob changed, no semantic delta
                 break;
             }
         }
         else {
+            const QString base = c.relPath.section('/', -1);
+            const char* verb = c.op == FileOp::Added     ? "added"
+                               : c.op == FileOp::Removed ? "removed"
+                                                         : "changed";
+            if (mediaNames.size() < 3) mediaNames << base + QLatin1Char(' ') + verb;
             switch (c.op) {
             case FileOp::Added: ++mediaAdded; break;
             case FileOp::Removed: ++mediaRemoved; break;
@@ -163,12 +171,19 @@ QString SetDiff::subjectLine() const
             }
         }
     }
-    if (mediaAdded || mediaRemoved || mediaModified) {
-        QStringList m;
-        if (mediaAdded) m << QStringLiteral("+%1").arg(mediaAdded);
-        if (mediaRemoved) m << QStringLiteral("−%1").arg(mediaRemoved);
-        if (mediaModified) m << QStringLiteral("~%1").arg(mediaModified);
-        parts << QStringLiteral("media ") + m.join(' ');
+    const int mediaTotal = mediaAdded + mediaRemoved + mediaModified;
+    if (mediaTotal > 0) {
+        // Name the files when there are only a few; fall back to a count otherwise.
+        if (mediaTotal <= 3) {
+            parts << mediaNames.join(QStringLiteral(", "));
+        }
+        else {
+            QStringList m;
+            if (mediaAdded) m << QStringLiteral("+%1").arg(mediaAdded);
+            if (mediaRemoved) m << QStringLiteral("-%1").arg(mediaRemoved);
+            if (mediaModified) m << QStringLiteral("~%1").arg(mediaModified);
+            parts << QStringLiteral("%1 media files (%2)").arg(mediaTotal).arg(m.join(' '));
+        }
     }
     QString line = parts.join(QStringLiteral(" · "));
     if (line.size() > 100) line = line.left(97) + QStringLiteral("…");

@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<!-- Proof-of-engine page: drop two .osu files, get the semantic diff JSON.
+     Serve this folder:  python serve.py   →  http://localhost:8080/demo.html -->
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>ovc-core wasm demo</title>
+    <style>
+        body { background: #0d0d0d; color: #e0e0e0; font: 15px sans-serif; margin: 2rem; }
+        .drop { border: 2px dashed #333; border-radius: 8px; padding: 2rem; text-align: center;
+                margin-bottom: 1rem; }
+        .drop.armed { border-color: #4a8a4a; }
+        pre { background: #101010; border: 1px solid #222; border-radius: 6px; padding: 1rem;
+              overflow: auto; max-height: 60vh; font-size: 13px; }
+        .sum { color: #8fbf8f; font-size: 17px; margin: 1rem 0; }
+    </style>
+</head>
+<body>
+    <h2>ovc-core · wasm demo</h2>
+    <div class="drop" id="drop">drop the BEFORE .osu, then the AFTER .osu (or both at once)</div>
+    <div class="sum" id="summary"></div>
+    <pre id="out"></pre>
+    <script>
+        // Stray drops outside the zone must never navigate away from the page.
+        addEventListener("dragover", (e) => e.preventDefault());
+        addEventListener("drop", (e) => e.preventDefault());
+    </script>
+    <script type="module">
+        let ovc;
+        try {
+            ({ loadOvcCore: window.__load } = await import("./index.mjs"));
+            ovc = await window.__load();
+        } catch (err) {
+            document.getElementById("drop").textContent =
+                "engine failed to load — serve this folder with `python serve.py` " +
+                "(plain http.server sends the wrong MIME for .mjs): " + err;
+            throw err;
+        }
+        document.title = ovc.version();
+
+        const files = [];
+        const drop = document.getElementById("drop");
+        const show = (t) => (document.getElementById("out").textContent = t);
+
+        drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("armed"); });
+        drop.addEventListener("dragleave", () => drop.classList.remove("armed"));
+        drop.addEventListener("drop", async (e) => {
+            e.preventDefault();
+            drop.classList.remove("armed");
+            for (const f of e.dataTransfer.files)
+                files.push({ name: f.name, bytes: new Uint8Array(await f.arrayBuffer()) });
+            if (files.length === 1) {
+                drop.textContent = `BEFORE = ${files[0].name} — now drop the AFTER .osu`;
+                show(JSON.stringify(ovc.map(files[0].bytes), null, 2));
+            }
+            if (files.length >= 2) {
+                const [a, b] = files;
+                drop.textContent = `${a.name}  →  ${b.name}  (drop again to restart)`;
+                const d = ovc.diff(a.bytes, b.bytes);
+                document.getElementById("summary").textContent =
+                    `${d.version}: ${d.summary}  ·  roundtrip ${ovc.roundtripOk(a.bytes) && ovc.roundtripOk(b.bytes) ? "ok" : "BROKEN"}`;
+                show(JSON.stringify(d, null, 2));
+                files.length = 0;
+            }
+        });
+    </script>
+</body>
+</html>

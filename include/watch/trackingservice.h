@@ -34,11 +34,22 @@ public:
     GameState gameState() const { return m_state; }
 
     std::optional<ovc::git::MapsetEntry> trackCurrentMapset(QString* err);
-    void requestManualSnapshot(const QString& repoId);
+    // `name` (optional) is applied as the new snapshot's label (git commit -m
+    // style). Ignored if the snapshot turns out to be a no-op.
+    void requestManualSnapshot(const QString& repoId, const QString& name = {});
     void setAutoSnapshot(const QString& repoId, bool on);
     RestorePreflight preflightRestore(const QString& repoId) const;
     std::optional<ovc::git::SnapshotResult> restore(const QString& repoId, const QByteArray& oid,
                                                     QString* err);
+    // Stop tracking a mapset: drop it from the registry (index.json) and, when
+    // deleteData is set, delete its shadow repo (repos/<repoId>). The osu! Songs
+    // folder is never touched. Emits trackedListChanged (+ activeMapsetChanged if
+    // the removed set was the active one).
+    bool untrack(const QString& repoId, bool deleteData, QString* err = nullptr);
+    // Manually re-point a tracked set at a renamed/moved folder — the escape hatch
+    // for when an upload changed the folder name + IDs and auto-detection missed it.
+    // Refreshes the stored IDs from the new folder and rebinds if it's active.
+    bool relink(const QString& repoId, const QString& newDir, QString* err = nullptr);
 
 public slots:
     void onBeatmapChanged(const ovc::watch::MemBeatmap& map);
@@ -49,6 +60,7 @@ signals:
     void activeMapsetChanged(const QString& repoId); // empty = untracked / none
     void snapshotTaken(const QString& repoId, const QString& subject, const QByteArray& oid);
     void snapshotFailed(const QString& repoId, const QString& reason);
+    void snapshotClean(const QString& repoId); // ran fine, nothing had changed
     void trackedListChanged();
 
 private:
@@ -61,6 +73,7 @@ private:
     void onFolderChanged();
     void enqueueSnapshot(const QString& repoId, const QString& trigger);
     void runNextSnapshot();
+    QString takePendingName(const QString& repoId);
     QString resolveIdentity(const MemBeatmap& map);
     QString activeDir() const;
 
@@ -72,7 +85,8 @@ private:
     GameState m_state = GameState::Unknown;
     QString m_activeRepoId;
     QString m_activeDir;
-    QHash<QString, QString> m_pending; // repoId -> trigger
+    QHash<QString, QString> m_pending;     // repoId -> trigger
+    QHash<QString, QString> m_pendingName; // repoId -> label for the next snapshot
     bool m_busy = false;
 };
 

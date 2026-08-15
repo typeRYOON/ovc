@@ -9,9 +9,48 @@ namespace ovc::watch {
 using ovc::git::MapsetEntry;
 using ovc::git::Registry;
 
+namespace {
+
+// Submitting a set is the one event that changes an .osu without the mapper
+// touching it: osu! stamps the assigned BeatmapID / BeatmapSetID into [Metadata]
+// and renames the folder to "<setId> Artist - Title". Zeroing those two lines
+// lets a pre-upload snapshot fingerprint identically to its just-submitted self,
+// so the content probe still recognises the folder as the same tracked set.
+QByteArray identityFingerprint(const QByteArray& osu)
+{
+    QByteArray out;
+    out.reserve(osu.size());
+    int i = 0;
+    const int n = osu.size();
+    while (i < n) {
+        int eol = osu.indexOf('\n', i);
+        if (eol < 0) eol = n;
+        QByteArray line = osu.mid(i, eol - i); // without the '\n'
+        const QByteArray key = line.trimmed();
+        if (key.startsWith("BeatmapID:"))
+            line = "BeatmapID:0";
+        else if (key.startsWith("BeatmapSetID:"))
+            line = "BeatmapSetID:0";
+        out += line;
+        if (eol < n) out += '\n';
+        i = eol + 1;
+    }
+    return out;
+}
+
+} // namespace
+
 TrackingService::TrackingService(QObject* parent)
     : QObject(parent), m_registry(Registry::load())
 {
+    // Freshen stored metadata from the .osu files on startup: picks up in-editor
+    // title/artist edits and repairs any entry whose strings a legacy build stored
+    // mis-encoded. Cheap (a header read per set); untouched folders leave values as-is.
+    bool metaChanged = false;
+    for (auto& e : m_registry.entries)
+        if (ovc::git::refreshMapsetMetadata(e)) metaChanged = true;
+    if (metaChanged) m_registry.save();
+
     connect(&m_binder, &SongsBinder::folderChangedStable, this,
             &TrackingService::onFolderChanged);
     connect(&m_snapWatcher, &QFutureWatcher<SnapJob>::finished, this, [this]() {
@@ -21,6 +60,8 @@ TrackingService::TrackingService(QObject* parent)
             emit snapshotTaken(job.repoId, job.res->subject, job.res->commitOid);
         else if (!job.err.isEmpty())
             emit snapshotFailed(job.repoId, job.err);
+        else
+            emit snapshotClean(job.repoId); // ran fine, nothing to commit
         runNextSnapshot();
     });
 }
@@ -45,40 +86,52 @@ QString TrackingService::resolveIdentity(const MemBeatmap& map)
     if (!hit) hit = m_registry.findByBeatmapId(map.mapId);
 
     if (!hit) {
-        // Content probe: does any tracked repo's HEAD hold a byte-identical
-        // .osu from this folder? Catches folder renames of unsubmitted sets.
+        // Content probe: does any tracked repo's HEAD hold an .osu whose identity
+        // fingerprint matches one in this folder? Catches a plain folder rename
+        // (bytes unchanged) AND an upload (folder renamed + IDs stamped into the
+        // files) — the case where every other anchor moves at once.
         const QDir d(dir);
         const QStringList osuFiles = d.entryList({QStringLiteral("*.osu")}, QDir::Files);
+        QList<QByteArray> diskPrints;
+        for (const QString& name : osuFiles) {
+            QFile f(d.filePath(name));
+            if (f.open(QIODevice::ReadOnly))
+                diskPrints.append(identityFingerprint(f.readAll()));
+        }
         for (MapsetEntry& e : m_registry.entries) {
             auto repo = ovc::git::ShadowRepo::open(e.repoDir());
             if (!repo) continue;
             for (const auto& [relPath, blobOid] : repo->listTree(repo->headOid())) {
                 if (!relPath.endsWith(QStringLiteral(".osu"))) continue;
-                for (const QString& name : osuFiles) {
-                    QFile f(d.filePath(name));
-                    if (f.open(QIODevice::ReadOnly) && f.readAll() == repo->readBlob(blobOid)) {
-                        hit = &e;
-                        break;
-                    }
+                if (diskPrints.contains(identityFingerprint(repo->readBlob(blobOid)))) {
+                    hit = &e;
+                    break;
                 }
-                if (hit) break;
             }
             if (hit) break;
         }
     }
     if (!hit) return {};
 
-    // Keep the registry's notion of where the folder lives current.
+    // Keep the registry's notion of this set current: follow folder renames and
+    // learn the real IDs the first time a submitted difficulty loads.
+    bool dirty = false;
+    bool listChanged = false;
     if (QDir::cleanPath(hit->songsPath) != dir) {
         hit->songsPath = dir;
         hit->folderName = QDir(dir).dirName();
-        m_registry.save();
-        emit trackedListChanged();
+        dirty = listChanged = true;
     }
     if (hit->beatmapSetId <= 0 && map.setId > 0) { // set uploaded since tracking
         hit->beatmapSetId = map.setId;
-        m_registry.save();
+        dirty = true;
     }
+    if (map.mapId > 0 && !hit->beatmapIds.contains(map.mapId)) { // diff got its ID
+        hit->beatmapIds.append(map.mapId);
+        dirty = true;
+    }
+    if (dirty) m_registry.save();
+    if (listChanged) emit trackedListChanged();
     return hit->repoId;
 }
 
@@ -145,6 +198,45 @@ std::optional<MapsetEntry> TrackingService::trackCurrentMapset(QString* err)
     return entry;
 }
 
+bool TrackingService::untrack(const QString& repoId, bool deleteData, QString* err)
+{
+    const MapsetEntry* e = m_registry.findByRepoId(repoId);
+    if (!e) {
+        if (err) *err = QStringLiteral("not tracked");
+        return false;
+    }
+    const QString dir = e->repoDir();
+    const bool wasActive = (repoId == m_activeRepoId);
+    m_registry.removeByRepoId(repoId);
+    if (!m_registry.save(err)) return false;
+    if (deleteData) QDir(dir).removeRecursively(); // the Songs folder is untouched
+    if (wasActive) {
+        m_activeRepoId.clear();
+        m_binder.unbind();
+        emit activeMapsetChanged(QString()); // the map may still be open, just untracked now
+    }
+    emit trackedListChanged();
+    return true;
+}
+
+bool TrackingService::relink(const QString& repoId, const QString& newDir, QString* err)
+{
+    MapsetEntry* e = m_registry.findByRepoId(repoId);
+    if (!e) {
+        if (err) *err = QStringLiteral("not tracked");
+        return false;
+    }
+    if (!ovc::git::relinkEntry(*e, newDir, err)) return false;
+    if (!m_registry.save(err)) return false;
+    // If this is the active set, follow it to the new folder so saves keep flowing.
+    if (repoId == m_activeRepoId) {
+        m_activeDir = QDir::cleanPath(newDir);
+        m_binder.bind(m_activeDir);
+    }
+    emit trackedListChanged();
+    return true;
+}
+
 void TrackingService::onFolderChanged()
 {
     if (m_activeRepoId.isEmpty()) return;
@@ -153,9 +245,15 @@ void TrackingService::onFolderChanged()
     enqueueSnapshot(m_activeRepoId, QStringLiteral("autosave"));
 }
 
-void TrackingService::requestManualSnapshot(const QString& repoId)
+void TrackingService::requestManualSnapshot(const QString& repoId, const QString& name)
 {
+    if (!name.trimmed().isEmpty()) m_pendingName[repoId] = name.trimmed();
     enqueueSnapshot(repoId, QStringLiteral("manual"));
+}
+
+QString TrackingService::takePendingName(const QString& repoId)
+{
+    return m_pendingName.take(repoId);
 }
 
 void TrackingService::setAutoSnapshot(const QString& repoId, bool on)
@@ -189,12 +287,19 @@ void TrackingService::runNextSnapshot()
         if (t >= 0) trailers.insert(QStringLiteral("Ovc-Editor-Time"), QString::number(t));
     }
 
+    // A name given at creation becomes the snapshot's label once it commits.
+    const QString name = takePendingName(repoId);
+
     m_busy = true;
     const MapsetEntry entry = *e; // worker gets a copy; registry stays GUI-thread-only
-    m_snapWatcher.setFuture(QtConcurrent::run([entry, trigger, trailers]() {
+    m_snapWatcher.setFuture(QtConcurrent::run([entry, trigger, trailers, name]() {
         SnapJob job;
         job.repoId = entry.repoId;
         job.res = ovc::git::snapshotMapset(entry, trigger, trailers, &job.err);
+        if (job.res && !name.isEmpty()) {
+            if (auto repo = ovc::git::ShadowRepo::open(entry.repoDir()))
+                repo->setLabel(job.res->commitOid, name);
+        }
         return job;
     }));
 }

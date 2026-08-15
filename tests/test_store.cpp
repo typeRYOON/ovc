@@ -5,6 +5,8 @@
 #include <git/registry.h>
 #include <git/setdiff.h>
 #include <git/shadowrepo.h>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -78,6 +80,9 @@ private slots:
     void diffTreesOps();
     void classifyPathCases();
     void trackAndSnapshotFlow();
+    void snapshotLabels();
+    void subjectLineWording();
+    void refreshMetadataUnicode();
 };
 
 void TestStore::initTestCase()
@@ -291,7 +296,10 @@ void TestStore::diffTreesOps()
 
     const QString subject = d.subjectLine();
     QVERIFY(subject.contains("VB"));
-    QVERIFY(subject.contains("media"));
+    // Few media files → named individually, not a bare "media ~N".
+    QVERIFY(subject.contains("audio.mp3 changed"));
+    QVERIFY(subject.contains("bg.png added"));
+    QVERIFY(subject.contains("gone.wav removed"));
 
     // Empty-tree base: everything shows as Added.
     const SetDiff import = diffTrees(*repo, "", *c1);
@@ -367,6 +375,104 @@ void TestStore::trackAndSnapshotFlow()
     QCOMPARE(log[0].trailers.value("Ovc-Difficulty"), QStringLiteral("VA"));
     QCOMPARE(log[0].trailers.value("Ovc-Time-Range"), QStringLiteral("1500-2500"));
     QVERIFY(log[0].trailers.contains("Ovc-Files"));
+}
+
+void TestStore::snapshotLabels()
+{
+    QTemporaryDir tmp;
+    QVERIFY(ShadowRepo::create(tmp.path(), nullptr));
+    QVERIFY(writeFile(tmp.path() + "/a.txt", "v1"));
+    auto repo = ShadowRepo::open(tmp.path());
+    const auto c1 = repo->commitAll("first", {});
+    QVERIFY(writeFile(tmp.path() + "/a.txt", "v2"));
+    const auto c2 = repo->commitAll("second", {});
+    QVERIFY(c1 && c2);
+
+    // No label until set; setting one shows up in log() and commitInfo().
+    QVERIFY(repo->labelFor(*c1).isEmpty());
+    QVERIFY(repo->setLabel(*c1, QStringLiteral("  before rework  ")));
+    QCOMPARE(repo->labelFor(*c1), QStringLiteral("before rework")); // trimmed
+    QCOMPARE(repo->commitInfo(*c1)->label, QStringLiteral("before rework"));
+
+    auto log = repo->log();
+    QCOMPARE(log.size(), 2);
+    // log is newest-first: c2 unlabeled, c1 labeled.
+    QVERIFY(log[0].label.isEmpty());
+    QCOMPARE(log[1].label, QStringLiteral("before rework"));
+
+    // Labels are keyed by oid and don't change it — restore-by-hash still works.
+    QCOMPARE(repo->headOid(), *c2);
+
+    // Empty name clears; a second label coexists.
+    QVERIFY(repo->setLabel(*c2, QStringLiteral("final")));
+    QVERIFY(repo->setLabel(*c1, QString()));
+    QVERIFY(repo->labelFor(*c1).isEmpty());
+    QCOMPARE(repo->labelFor(*c2), QStringLiteral("final"));
+
+    // Persists across reopen (it's a file beside the repo).
+    auto reopened = ShadowRepo::open(tmp.path());
+    QCOMPARE(reopened->labelFor(*c2), QStringLiteral("final"));
+}
+
+void TestStore::subjectLineWording()
+{
+    QTemporaryDir tmp;
+    QVERIFY(ShadowRepo::create(tmp.path(), nullptr));
+    QVERIFY(writeFile(tmp.path() + "/audio.mp3", QByteArray(100, 'a')));
+    auto repo = ShadowRepo::open(tmp.path());
+    const auto c1 = repo->commitAll("c1", {});
+    QVERIFY(c1.has_value());
+
+    // Single media edit names the file — no opaque "media ~1".
+    QVERIFY(writeFile(tmp.path() + "/audio.mp3", QByteArray(200, 'b')));
+    const auto c2 = repo->commitAll("c2", {});
+    QString subject = diffTrees(*repo, *c1, *c2).subjectLine();
+    QCOMPARE(subject, QStringLiteral("audio.mp3 changed"));
+
+    // Many media files fall back to a count with a breakdown.
+    for (int i = 0; i < 5; ++i)
+        QVERIFY(writeFile(tmp.path() + QStringLiteral("/s%1.wav").arg(i), QByteArray(50, 'x')));
+    const auto c3 = repo->commitAll("c3", {});
+    subject = diffTrees(*repo, *c2, *c3).subjectLine();
+    QVERIFY2(subject.contains("5 media files"), qPrintable(subject));
+    QVERIFY(subject.contains("+5"));
+}
+
+void TestStore::refreshMetadataUnicode()
+{
+    // 陽だまりの詩 / ゆよゆっぺ as raw UTF-8, spelled in hex so the check is
+    // independent of this source file's own encoding. A regression guard for the
+    // bug where a set's Japanese title/artist stored as CP1252-mangled mojibake.
+    const QByteArray titleUtf8 =
+        "\xE9\x99\xBD\xE3\x81\xA0\xE3\x81\xBE\xE3\x82\x8A\xE3\x81\xAE\xE8\xA9\xA9";
+    const QByteArray artistUtf8 = "\xE3\x82\x86\xE3\x82\x88\xE3\x82\x86\xE3\x81\xA3\xE3\x81\xBA";
+
+    QTemporaryDir songs;
+    const QByteArray osu = QByteArray("osu file format v14\n\n[Metadata]\n"
+                                      "Title:Hidamari no Uta\nTitleUnicode:") +
+                           titleUtf8 + "\nArtist:Yuyoyuppe\nArtistUnicode:" + artistUtf8 +
+                           "\nCreator:Undead Alice\nBeatmapID:1\nBeatmapSetID:2\n";
+    QVERIFY(writeFile(songs.path() + "/map.osu", osu));
+
+    MapsetEntry e;
+    e.songsPath = songs.path();
+    e.title = QStringLiteral("stale");
+    e.artist = QStringLiteral("stale");
+
+    QVERIFY(refreshMapsetMetadata(e));
+    // Native Unicode metadata is preferred and decoded as UTF-8, not the local codepage.
+    QCOMPARE(e.title.toUtf8(), titleUtf8);
+    QCOMPARE(e.artist.toUtf8(), artistUtf8);
+    QCOMPARE(e.creator, QStringLiteral("Undead Alice"));
+
+    // And it survives the registry's JSON serialization (UTF-8) with no re-encoding.
+    const QByteArray json =
+        QJsonDocument(QJsonObject{{QStringLiteral("title"), e.title}}).toJson();
+    const QString roundTrip =
+        QJsonDocument::fromJson(json).object().value(QStringLiteral("title")).toString();
+    QCOMPARE(roundTrip.toUtf8(), titleUtf8);
+
+    QVERIFY(!refreshMapsetMetadata(e)); // idempotent: a second pass is a no-op
 }
 
 QTEST_GUILESS_MAIN(TestStore)

@@ -1,6 +1,6 @@
 #pragma once
 #include <git/shadowrepo.h>
-#include <osu/diff.h>
+#include <ovccore/diff.h>
 #include <QString>
 #include <optional>
 
@@ -18,7 +18,7 @@ struct FileChange {
     FileKind kind = FileKind::Other;
     QByteArray oldOid, newOid; // blob hex oids; empty when absent
     qint64 oldSize = 0, newSize = 0;
-    std::optional<osu::BeatmapDiff> semantic; // filled for changed/renamed .osu
+    std::optional<ovc::core::BeatmapDiff> semantic; // filled for changed/renamed .osu
 };
 
 struct SetDiff {

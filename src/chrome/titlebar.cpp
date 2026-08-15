@@ -14,7 +14,7 @@
 #include <QWindow>
 
 namespace {
-constexpr auto kAppIcon = ":/icons/taskbar.png";
+constexpr auto kAppIcon = ":/icons/std.svg";
 constexpr auto kIconTitleMin = ":/icons/title_min.png";
 constexpr auto kIconTitleMax = ":/icons/title_max.png";
 constexpr auto kIconTitleClose = ":/icons/title_close.png";

@@ -110,6 +110,11 @@ MapsetEntry* Registry::findByBeatmapId(int beatmapId)
     return nullptr;
 }
 
+bool Registry::removeByRepoId(const QString& repoId)
+{
+    return entries.removeIf([&](const MapsetEntry& e) { return e.repoId == repoId; }) > 0;
+}
+
 QString Registry::newRepoId() const
 {
     QString id;
