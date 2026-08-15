@@ -1,26 +1,15 @@
-# ovc — osu! Version Control
+# osu! Version Control
 
 Version history for osu! beatmaps. A small desktop tracker that snapshots your mapset every
-time you save, and a web viewer that diffs and restores that history **semantically** — it
+time you save, and a web viewer that diffs and restores that history **semantically**, it
 parses `.osu`, so instead of "line 412 changed" you get *"OD 8 → 9," "+3 notes at 01:24,"
 "slider reshaped."*
 
 - **Viewer:** <https://ryoon.moe/ovc>
 - **Write-up:** <https://ryoon.moe/blog/ovc>
+- **YouTube Explanation:** <https://youtube.com>
 
 > Windows only for now. Reads osu! **stable**; lazer works through a staging folder (see the write-up).
-
-## What it does
-
-- **Auto-snapshots** every save of the map you have open in the editor (detected from the client).
-- **Semantic diffs** — notes, timing, SV, hitsounds, slider shape/length, metadata, breaks, storyboard.
-- **Timeline viewer** — scrub any past version with audio and hitsounds, all four modes.
-- **Restore** any snapshot back into your Songs folder (your current state is snapshotted first).
-- **Collab merges** — exchange `.ovcz` bundles; a per-object three-way merge, with a visual conflict
-  resolver on the timeline for the rare collision.
-
-The shadow history lives entirely in `%LOCALAPPDATA%\ovc\`, never inside your Songs folder, and the
-desktop app is the only thing that ever writes files.
 
 ## Install
 
@@ -59,8 +48,9 @@ merge cleanly even across an upload.
 
 ## License
 
-**TBD.** (Qt is used under the LGPL via dynamic linking; libgit2 is GPLv2 with a linking exception, so
-it doesn't dictate the project license.)
+Licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0). Qt is used under the
+LGPL via dynamic linking, and libgit2 is GPLv2 with a linking exception, so neither constrains this
+choice.
 
 ## Credits
 
